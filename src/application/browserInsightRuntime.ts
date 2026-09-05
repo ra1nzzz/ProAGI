@@ -283,6 +283,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
 
     if (this.imported) this.imported = withoutClaim(this.imported, claim, lineageAnchors);
+    this.service = new InsightLoopService();
     if (journal.state === 'PURGE_PENDING') {
       await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });

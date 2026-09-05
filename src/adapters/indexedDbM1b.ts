@@ -1041,6 +1041,7 @@ export class IndexedDbM1bAdapter {
     const db = await this.database();
     const tx = db.transaction([...ROOT_STORES], 'readonly');
     const receipts: { rootId: string; scannedItemCount: number; forbiddenReferenceCount: number }[] = [];
+    const registryBefore = [...this.inProcessRoots.keys()].sort();
     let reachableCount = 0;
     for (const root of ROOT_STORES) {
       const { keys, values } = await entries(tx.objectStore(root));
@@ -1059,14 +1060,16 @@ export class IndexedDbM1bAdapter {
       receipts.push({ rootId: root.rootId, scannedItemCount: values.length, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
     }
+    const registryAfter = [...this.inProcessRoots.keys()].sort();
+    const registryComplete = registryBefore.length === registryAfter.length && registryBefore.every((rootId, index) => rootId === registryAfter[index]);
     return {
       deletionId: journal.id,
       generation: journal.purge.generation,
       receipts,
       reachableCount,
       allRequiredClientsPurged: true,
-      registryComplete: receipts.length === ROOT_STORES.length + this.inProcessRoots.size,
-      outcome: reachableCount === 0 ? 'CLEAN' : 'REACHABLE',
+      registryComplete,
+      outcome: !registryComplete ? 'REGISTRY_INCOMPLETE' : reachableCount === 0 ? 'CLEAN' : 'REACHABLE',
       coverage: 'single-browser-in-process',
     };
   }

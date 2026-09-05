@@ -199,3 +199,9 @@
 - 新增 privacy regression：过期 client 在 active purge 中续租时必须原子转入 QUARANTINED 并保留在 required membership。
 - 完整门禁：11 suites、Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送 `7d6f5e7`；Evidence Pack 将在本轮提交后重新生成。
+
+## Goal Round 9
+
+- 为 runtime start/close 增加 operation-generation fence：close 期间未完成的 start 不得重新注册、创建 heartbeat 或将 runtime 标记为 started。
+- Recovery blocked UI 与 lease regression 保持通过；新增提交前 YT 修复后完整门禁：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送 `de1bb2e`；本轮结束前重新生成 Evidence Pack。

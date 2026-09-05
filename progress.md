@@ -342,3 +342,10 @@
 - 加强 lineage purge reload E2E：在保留行为事件的产品语义下，明确断言 reload 后 claim card 恢复存在，但已删除目标 statement 不再出现。
 - 完整 production gate 通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `f5dea78`。
+
+## Goal Round 43–44
+
+- 修复 sealed purge 期间 client renewal：只要 active deletion journal 尚未终态验证，renewal 持续保持 `QUARANTINED`，避免 sealed 后冻结标签恢复 ACTIVE 并携带 stale heap。
+- 新增 regression 覆盖 sealed journal renewal quarantine。
+- Release gate 通过：Vitest 63/63、Playwright 18/18、smoke 2/2、worker/privacy nightly、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `c594c90`。

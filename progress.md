@@ -252,6 +252,12 @@
 - 通过 YT review 后的完整门禁：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `7bc0be6`。
 
+## Goal Round 20
+
+- 删除确认增加 single-flight guard：确认删除后进入 deletionBusy，避免在异步删除期间重复提交或并发纠正。
+- 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `47fb156`。
+
 ## Goal Round 18–19
 
 - 补充删除确认 dialog 的 Escape 关闭与 invoker focus restoration Playwright 覆盖。

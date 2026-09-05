@@ -1,5 +1,5 @@
 import { IndexedDbM1bAdapter, makeBatch, toStoredRecord } from '../adapters/indexedDbM1b';
-import type { AtomicMutationBatch, CommitLedgerRecord, StoredRecord } from '../adapters/m1bTypes';
+import type { ActiveDeletionJournalRecord, AtomicMutationBatch, CommitLedgerRecord, StoredRecord } from '../adapters/m1bTypes';
 import { hashCanonical } from '../domain/canonical';
 import type { CorrectionAction, CorrectionCommand, CorrectionRecord, KnowledgeHead, KnowledgeSnapshot, KnowledgeVersion, WorkModelClaim } from '../domain/types';
 import { developerDayFixtureJson } from '../fixtures/developerDay';
@@ -30,6 +30,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private adapter = new IndexedDbM1bAdapter(DATABASE_NAME);
   private readonly clientId = crypto.randomUUID();
   private readonly purgeChannel: BroadcastChannel | null = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1');
+  private clientRenewal: ReturnType<typeof setInterval> | null = null;
+  private operationGeneration = 0;
   private service = new InsightLoopService();
   private imported: ImportCommit | null = null;
   private started = false;
@@ -42,20 +44,39 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.purgeChannel?.addEventListener('message', (event) => {
       const data = event.data as { type?: string; deletionId?: string; generation?: string; clientId?: string };
       if (data.type !== 'PURGE_REQUEST' || data.clientId === this.clientId || !data.deletionId || !data.generation) return;
-      this.pendingPreview = null;
-      this.imported = null;
-      this.service = new InsightLoopService();
-      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
-      void this.adapter.acknowledgePurge(data.deletionId, data.generation, this.clientId).catch(() => undefined);
+      void this.releaseForPurge(data.deletionId, data.generation);
     });
+  }
+
+  private async releaseForPurge(deletionId: string, generation: string): Promise<void> {
+    const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal').catch(() => []);
+    const journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
+    if (!journal || journal.state === 'FAILED' || journal.purge.sealedAt) return;
+    this.operationGeneration += 1;
+    const pending = this.pendingPreview;
+    this.pendingPreview = null;
+    if (pending) await this.adapter.cancelPreview(pending.token).catch(() => undefined);
+    this.imported = null;
+    this.service = new InsightLoopService();
+    await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
   }
 
   async start(): Promise<BrowserRuntimeSnapshot> {
     if (!this.started) {
       this.starting ??= (async () => {
         await this.adapter.open();
-        await this.adapter.registerClient(this.clientId);
-        await this.hydrate();
+        const registration = await this.adapter.registerClient(this.clientId);
+        this.clientRenewal ??= setInterval(() => { void this.adapter.renewClient(this.clientId).catch(() => undefined); }, 2_000);
+        if (registration.state === 'QUARANTINED') {
+          const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
+          const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
+          this.imported = null;
+          this.service = new InsightLoopService();
+          if (active && !active.purge.sealedAt) await this.adapter.acknowledgePurge(active.id, active.purge.generation, this.clientId);
+        } else {
+          await this.hydrate();
+        }
         this.started = true;
       })().finally(() => { this.starting = null; });
       await this.starting;
@@ -296,22 +317,26 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   close(): void {
+    this.operationGeneration += 1;
+    if (this.clientRenewal) clearInterval(this.clientRenewal);
+    this.clientRenewal = null;
     this.purgeChannel?.close();
-    void this.adapter.closeClient(this.clientId).catch(() => undefined);
     const adapter = this.adapter;
     const pending = this.pendingPreview;
     this.pendingPreview = null;
-    if (pending) {
-      void adapter.cancelPreview(pending.token).finally(() => adapter.close());
-    } else {
+    void (async () => {
+      if (pending) await adapter.cancelPreview(pending.token).catch(() => undefined);
+      await adapter.closeClient(this.clientId).catch(() => undefined);
       adapter.close();
-    }
+    })();
     if (this.starting) void this.starting.then(() => adapter.close(), () => undefined);
     this.started = false;
   }
 
   private async hydrate(): Promise<void> {
+    const generation = this.operationGeneration;
     const records = await this.adapter.scanPublishedBusiness();
+    if (generation !== this.operationGeneration) return;
     const marker = records.find((record) => record.recordId === FIXTURE_MARKER_ID) as StoredRecord<FixtureMarker> | undefined;
     if (!marker) {
       this.service = new InsightLoopService();
@@ -336,6 +361,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       deletedClaimKeys: !hasStoredClaim && base ? [base.claimKey] : [],
     };
     service.knowledge.hydrate(snapshot);
+    if (generation !== this.operationGeneration) return;
     this.service = service;
     this.imported = !hasStoredClaim && base ? withoutClaim(receipt.result, base) : receipt.result;
   }

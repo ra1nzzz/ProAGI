@@ -501,6 +501,26 @@ export class IndexedDbM1bAdapter {
     }
   }
 
+  async renewClient(clientId: string, now = Date.now()): Promise<ClientRegistrationRecord> {
+    const db = await this.database();
+    const tx = db.transaction('system', 'readwrite');
+    const done = transactionDone(tx);
+    try {
+      const store = tx.objectStore('system');
+      const current = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
+      if (!current || current.recordType !== 'client_registration') throw new M1bError('ERR_CLIENT_NOT_REGISTERED');
+      const next = { ...current, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString() };
+      const record = { ...next, contentHash: hashCanonical(withoutHash(next)) };
+      store.put(record);
+      await done;
+      return record;
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
   async planDeletion(target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchors?: readonly string[] },  cause: DeletionPlanRecord['cause'] = 'user-delete'): Promise<DeletionPlanRecord> {
     const db = await this.database();
     const tx = db.transaction([...ROOT_STORES], 'readonly');

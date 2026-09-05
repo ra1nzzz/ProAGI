@@ -93,6 +93,13 @@ describe('M1b deletion and recovery control plane', () => {
     await expect(adapter.enumerateDeletionPage(journal.id, 'owner-b', stolen.fencingToken, 10, now + 7_001)).resolves.toBeDefined();
   });
 
+  it('rejects heartbeat renewal after a client begins closing', async () => {
+    const adapter = createAdapter();
+    await adapter.registerClient('closing-client', now);
+    await adapter.closeClient('closing-client', now + 1);
+    await expect(adapter.renewClient('closing-client', now + 2)).rejects.toMatchObject({ code: 'ERR_CLIENT_CLOSING' });
+  });
+
   it('renews an expired client into the active purge membership atomically', async () => {
     const adapter = createAdapter();
     await adapter.registerClient('client-a', now);

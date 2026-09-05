@@ -360,9 +360,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       journal = await this.adapter.retryPurge(journal.id, this.clientId, lease.fencingToken, [], Date.now());
       await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
     }
-    await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
-    const audit = await this.adapter.sealAndAudit(journal.id, this.clientId, lease.fencingToken, Date.now());
-    if (audit.outcome !== 'CLEAN') throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : 'ERR_DELETE_REACHABLE');
+    if (journal.state === 'PURGE_PENDING' || journal.state === 'AUDITING') {
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+      const audit = await this.adapter.sealAndAudit(journal.id, this.clientId, lease.fencingToken, Date.now());
+      if (audit.outcome !== 'CLEAN') throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : 'ERR_DELETE_REACHABLE');
+    }
     let finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
     while (!finalizing.finalizing.complete) {
       await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());

@@ -330,3 +330,9 @@
 - 将 production smoke 纳入 `verify:pr`，确保 PR 门禁同时执行完整 production-preview E2E 与 canonical smoke。
 - 完整门禁通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `16c8fc7`。
+
+## Goal Round 40
+
+- 增加 UI purge commit handshake：runtime 在 ACK 前等待 external-purge UI listener 的下一轮 timer，让 React imported/preview/Orb 状态先进入释放路径；无 UI listener 时保留安全 fallback。
+- 完整门禁通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `c39c47d`。

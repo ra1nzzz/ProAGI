@@ -14,6 +14,12 @@ afterEach(async () => {
 });
 
 describe('runnable Insight Loop UI', () => {
+  it('exposes a safe no-op recovery when no active deletion journal exists', async () => {
+    const runtime = new BrowserInsightRuntime();
+    await expect(runtime.recover()).resolves.toBeUndefined();
+    runtime.close();
+  });
+
   it('previews and commits the bundled fixture, applies a correction, then replays', async () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: '预览本地样例' }));

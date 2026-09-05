@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserInsightRuntime } from '../application/browserInsightRuntime';
 import type { ImportCommit } from '../application/insightService';
 import type { CorrectionAction } from '../domain/types';
@@ -42,12 +42,14 @@ export function AppShell() {
   if (!runtimeRef.current) runtimeRef.current = new BrowserInsightRuntime();
   const privateMode = canonicalPrivate;
 
-  useEffect(() => {
-    const handleExternalPurge = () => {
+  useLayoutEffect(() => {
+    const handleExternalPurge = (event: Event) => {
       setImported(null);
       setPreviewToken(null);
       setDomainStatus('其他标签页已完成隐私清除；当前视图已释放旧数据。');
       setOrbState('IDLE');
+      const onCommitted = (event as CustomEvent<{ onCommitted?: () => void }>).detail?.onCommitted;
+      if (onCommitted) setTimeout(onCommitted, 0);
     };
     window.addEventListener('proagi:external-purge', handleExternalPurge);
     return () => window.removeEventListener('proagi:external-purge', handleExternalPurge);

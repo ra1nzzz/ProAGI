@@ -63,7 +63,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     if (pending) await this.adapter.cancelPreview(pending.token).catch(() => undefined);
     this.imported = null;
     this.service = new InsightLoopService();
-    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
+    if (typeof window !== 'undefined') {
+       await new Promise<void>((resolve) => {
+         let settled = false;
+         const finish = () => { if (!settled) { settled = true; resolve(); } };
+         window.dispatchEvent(new CustomEvent('proagi:external-purge', { detail: { onCommitted: finish } }));
+         setTimeout(finish, 0);
+       });
+     }
     if (!journal.purge.sealedAt) await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
     } catch {
       this.purgeReleases.delete(releaseKey);

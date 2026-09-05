@@ -108,8 +108,9 @@ test('accept and edit then delete closes the full claimKey lineage across reload
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await expect(page.getByRole('alertdialog')).toBeVisible();
-  await page.getByRole('button', { name: '取消' }).click();
+  await page.keyboard.press('Escape');
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '删除 Insight' })).toBeFocused();
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await page.getByRole('button', { name: '确认删除' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
@@ -176,8 +177,9 @@ test('a second tab releases deleted lineage before purge audit completes', async
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await expect(page.getByRole('alertdialog')).toBeVisible();
-  await page.getByRole('button', { name: '取消' }).click();
+  await page.keyboard.press('Escape');
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '删除 Insight' })).toBeFocused();
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await page.getByRole('button', { name: '确认删除' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');

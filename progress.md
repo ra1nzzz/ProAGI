@@ -151,3 +151,10 @@
 - 修复删除失败时的 runtime hydrate 回滚、stale projection 写按钮门禁、空库 Orb 初始状态、live status hash 泄露、Cache clear 超时、dedupe 完整 payload 比较，并补充 `nav` landmark。
 - 按模块完成原子提交并推送到同名 GitHub 仓库：`https://github.com/ra1nzzz/ProAGI`；主要提交为 M1a、M1b、M1c 及 fix/test commits。
 - 最终验证：11 suites、Vitest 57/57、Playwright 16/16、typecheck/lint/CSP/audit/build 全部通过；但跨标签删除/PURGE 应用接线仍是后续 P0，目标保持 active。
+
+## Goal Round 2
+
+- 复核指出并已关闭删除复活 P0：删除计划现在以稳定 `claimKey` lineage anchors 扩展完整 claim/version/head/correction/report 闭包；新增 accept→edit→delete→reload Playwright 双 viewport 回归。
+- 修复删除失败时的 hydrate 回滚、same-tab application root 在 audit 前释放、dedupe 完整 payload 比较、blocked clear timeout、空库 Orb 状态、stale correction 禁用与 hash live-region 暴露。
+- 修复 `test-after-change-v1` 因果顺序漏洞：必须存在按 canonical 顺序排列的 file.changed→passed test；逆序负例已加入 Replay 测试。
+- 本轮已推送原子提交：`466dd07`（M1a 因果顺序修复）。最新工作树干净；跨标签删除/PURGE 应用接线仍待最小安全实现，尚不可宣称完整目标完成。

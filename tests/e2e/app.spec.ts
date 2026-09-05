@@ -32,7 +32,7 @@ test('renders the canonical AppShell order and eight-part Orb', async ({ page })
     previous = top;
   }
   await expect(page.locator('[data-orb-part]')).toHaveCount(8);
-  await expect(page.locator('.orb')).toHaveAttribute('data-state', 'SUGGESTION');
+  await expect(page.locator('.orb')).toHaveAttribute('data-state', 'IDLE');
 });
 
 test('privacy mode has visible text and survives narrow reflow', async ({ page }) => {

@@ -118,7 +118,7 @@ describe('AppShell accessibility contracts', () => {
 
   it('supports Move Orb keyboard mode, cancel, save, and reset', () => {
     render(<App />);
-    const orb = screen.getByRole('button', { name: '有一条建议待审阅' });
+    const orb = screen.getByRole('button', { name: '本地观察已就绪' });
 
     fireEvent.click(orb);
     expect(orb).toHaveAttribute('data-profile', 'active');

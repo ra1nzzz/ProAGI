@@ -303,3 +303,5 @@
 - 完善 purge receiver 失败重试标记，扩展 cross-tab barrier E2E 等待窗口，避免 ACK 延迟被测试默认 timeout 掩盖。
 - 完整门禁再次通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送 `cfb3b25`；当前工作树干净。
+- 修正 recovery orchestrator：`FINALIZING` checkpoint 不再错误回调用仅接受 PURGE_PENDING/AUDITING 的 `sealAndAudit`，可直接续做 finalization。
+- 已推送原子提交 `1fcac98`。

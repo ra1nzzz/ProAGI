@@ -336,3 +336,9 @@
 - 增加 UI purge commit handshake：runtime 在 ACK 前等待 external-purge UI listener 的下一轮 timer，让 React imported/preview/Orb 状态先进入释放路径；无 UI listener 时保留安全 fallback。
 - 完整门禁通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `c39c47d`。
+
+## Goal Round 41–42
+
+- 加强 lineage purge reload E2E：在保留行为事件的产品语义下，明确断言 reload 后 claim card 恢复存在，但已删除目标 statement 不再出现。
+- 完整 production gate 通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `f5dea78`。

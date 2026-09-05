@@ -4,4 +4,7 @@ coverage/
 evidence/
 *.log
 .tools/
+*.tsbuildinfo
+test-results/
+evidence-logs/
 .DS_Store

@@ -263,3 +263,10 @@
 - 补充删除确认 dialog 的 Escape 关闭与 invoker focus restoration Playwright 覆盖。
 - 短暂 TLS 故障恢复后成功 push `1bef614`；完整门禁恢复通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 最新 cross-tab E2E 使用单 worker、重复运行稳定通过；工作树保持干净。
+
+## Goal Round 21–24
+
+- 新增 application-level `recover()` takeover：读取 active journal，steal expired recovery lease，按 FENCED/DELETING/PURGE_PENDING/AUDITING/FINALIZING 状态继续执行，逐阶段续租并最终 verify。
+- RecoverySurface 的“重试恢复”接入真实 runtime recovery，不再只是切换演示状态。
+- 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `1340ab0`；当前工作树干净。

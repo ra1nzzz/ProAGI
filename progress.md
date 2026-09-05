@@ -276,3 +276,10 @@
 - 为 retryPurge 增加 membership invariant 断言：即使调用者传入缩减列表，事务内仍保留 active/quarantined client 全集。
 - 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `1c8110d`。
+
+## Goal Round 26
+
+- 将 `recover()` 正式加入 `ControlPort` contract，确保 recovery takeover 是可调用的控制能力而非 runtime 私有旁路。
+- RecoverySurface、runtime recovery 与 adapter membership invariant 完成回归。
+- 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `c1adb35`。

@@ -324,3 +324,9 @@
 - Playwright webServer 改为 `npm run build && npm run preview`，E2E 现在直接验证 production dist，而非 Vite dev server；新增 `preview` script。
 - 生产 preview E2E：18/18；完整门禁：Vitest 62/62、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `c1f8f93`。
+
+## Goal Round 39
+
+- 将 production smoke 纳入 `verify:pr`，确保 PR 门禁同时执行完整 production-preview E2E 与 canonical smoke。
+- 完整门禁通过：Vitest 62/62、Playwright 18/18，smoke 2/2，typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `16c8fc7`。

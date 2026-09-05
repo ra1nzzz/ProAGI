@@ -202,6 +202,7 @@ describe('M1b deletion and recovery control plane', () => {
     const result = await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
     expect(result.outcome).toBe('REGISTRY_INCOMPLETE');
     expect(result.registryComplete).toBe(false);
+    expect(result.registryRevision).toBeDefined();
   });
 
   it('reports clear blocking honestly and keeps CLEAR_ONLY', async () => {

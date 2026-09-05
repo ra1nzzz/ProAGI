@@ -21,6 +21,15 @@ function replayInput(inputEvents: readonly BehaviorEvent[], store = new InMemory
 }
 
 describe('ReplayV1 determinism', () => {
+  it('does not infer test-after-change when the causal event order is reversed', () => {
+    const reversed = events().map((event) => event.kind === 'file.changed'
+      ? { ...event, occurredAt: '2026-01-02T10:07:00Z' }
+      : event.kind === 'test.completed'
+        ? { ...event, occurredAt: '2026-01-02T10:06:00Z' }
+        : event);
+    expect(runInsightLoop(reversed, { asOf: '2026-01-02T10:08:00Z', timezone: 'UTC' }).claims).toHaveLength(0);
+  });
+
   it('is invariant to input order, exact retries, and random ingress IDs', () => {
     const normal = events();
     const disturbed = events(fixtureJson([...baseFixture.events].reverse().concat(baseFixture.events[0]!)))

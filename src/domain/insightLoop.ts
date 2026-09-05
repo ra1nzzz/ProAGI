@@ -98,9 +98,10 @@ function inferClaims(episodes: readonly Episode[], events: readonly BehaviorEven
   const projects = [...new Set(events.map((event) => event.subject.projectKey).filter((value): value is string => Boolean(value)))].sort();
   return projects.flatMap((projectKey) => {
     const scoped = events.filter((event) => event.subject.projectKey === projectKey);
-    const changed = scoped.some((event) => event.kind === 'file.changed');
-    const passed = scoped.some((event) => event.kind === 'test.completed' && event.attributes.testOutcome === 'passed');
-    if (!changed || !passed) return [];
+    const changedIndexes = scoped.flatMap((event, index) => event.kind === 'file.changed' ? [index] : []);
+    const passedIndexes = scoped.flatMap((event, index) => event.kind === 'test.completed' && event.attributes.testOutcome === 'passed' ? [index] : []);
+    const hasOrderedPair = changedIndexes.some((changedIndex) => passedIndexes.some((passedIndex) => passedIndex > changedIndex));
+    if (!hasOrderedPair) return [];
     const scope: Scope = { projectKey, activityKind: 'test' };
     const episodeEvidence = episodes.filter((episode) => episode.projectKey === projectKey).map(episodeRef);
     const semantic = {

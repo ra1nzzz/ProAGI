@@ -184,3 +184,11 @@
 - quarantine startup 检查 active journal，禁止旧数据 hydrate/render；purge receiver 做 journal/generation 校验、取消 pending preview、generation fence 后再 ACK。
 - 最新完整门禁：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `7dc81c5`；下一步仍需对 delayed/lost BroadcastChannel、lease-expiry 与不可逆删除确认流程补齐测试与修复。
+
+## Goal Round 7
+
+- 根据三维复审继续加固：`renewClient` 在 system+journal 事务中识别 active purge 并原子 quarantine/加入 required membership；VERIFIED 事务恢复同 generation clients；`retryPurge` 事务内重算 membership。
+- purge owner 全阶段续租 recovery lease；CLIENTS_PENDING 最多等待 5 秒、持续重广播并以显式 `ERR_PURGE_CLIENTS_PENDING` 退出，不再伪装成 root reachability error。
+- 删除操作增加 accessible alertdialog：明确不可逆影响，提供 Cancel/Confirm，且 Playwright deletion tests 已适配确认流程。
+- 本地完整门禁再次通过：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送 `7dc81c5` 与 `d1ff277`；最新确认流程提交为 `d1ff277`。仍待 delayed/lost BroadcastChannel 与 recovery surface 的专门故障注入测试。

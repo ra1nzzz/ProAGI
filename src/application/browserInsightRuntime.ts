@@ -55,7 +55,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.purgeReleases.add(releaseKey);
     const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal').catch(() => []);
     const journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
-    if (!journal || journal.state === 'FAILED' || journal.purge.sealedAt) return;
+    if (!journal || journal.state === 'FAILED') return;
     this.operationGeneration += 1;
     const pending = this.pendingPreview;
     this.pendingPreview = null;
@@ -63,7 +63,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.imported = null;
     this.service = new InsightLoopService();
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
-    await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
+    if (!journal.purge.sealedAt) await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
   }
 
   async start(): Promise<BrowserRuntimeSnapshot> {

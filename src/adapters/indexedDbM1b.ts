@@ -509,6 +509,7 @@ export class IndexedDbM1bAdapter {
       const store = tx.objectStore('system');
       const current = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
       if (!current || current.recordType !== 'client_registration') throw new M1bError('ERR_CLIENT_NOT_REGISTERED');
+      if (current.state === 'CLOSING') throw new M1bError('ERR_CLIENT_CLOSING');
       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
       const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
       const quarantined = Boolean(active && !active.purge.sealedAt);

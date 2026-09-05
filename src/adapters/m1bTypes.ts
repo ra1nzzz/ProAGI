@@ -136,7 +136,7 @@ export interface DeletionPlanRecord {
   recordId: string;
   recordType: 'deletion_plan';
   writtenAt: string;
-  target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string };
+  target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchors?: readonly string[] };
   cause: 'user-delete' | 'consent-revoked' | 'retention-expired' | 'clear-all';
   baseCursor: Cursor;
   basePrivacyEpoch: number;
@@ -165,6 +165,7 @@ export interface ActiveDeletionJournalRecord {
   targetId: string;
   targetHash: Hash;
   targetType: string;
+  targetAnchors: readonly string[];
   baseCursor: Cursor;
   basePrivacyEpoch: number;
   enumeration: { registryIndex: number; pageOffset: number; complete: boolean; enumeratedCount: number };

@@ -169,8 +169,13 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     if (!result.ok) return result;
 
     if (action === 'delete') {
-      await this.deleteClaimLineage(current);
-      return result;
+      try {
+        await this.deleteClaimLineage(current);
+        return result;
+      } catch (error) {
+        await this.hydrate();
+        throw error;
+      }
     }
 
     try {
@@ -202,12 +207,12 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   private async deleteClaimLineage(claim: WorkModelClaim): Promise<void> {
-    if (this.imported) this.imported = withoutClaim(this.imported, claim);
+    const lineageAnchors = await this.collectClaimLineageAnchors(claim.claimKey);
     const target = await this.adapter.getRecord('business', claim.id) as StoredRecord | undefined;
     const storedClaim = target?.payload as WorkModelClaim | undefined;
     if (!target || storedClaim?.contentHash !== claim.contentHash) throw new Error('ERR_NOT_FOUND');
     const plan = await this.adapter.planDeletion({
-      storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType,
+      storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType, lineageAnchors,
     });
     const ownerClientId = crypto.randomUUID();
     const startedAt = Date.now();
@@ -218,6 +223,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
     while (journal.state === 'DELETING') {
       journal = await this.adapter.deleteChunk(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
+    }
+
+    if (this.imported) this.imported = withoutClaim(this.imported, claim, lineageAnchors);
+    if (journal.state === 'PURGE_PENDING') { /* no registered peer clients in M1 */
+      void journal;
     }
     const audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
     if (audit.outcome !== 'CLEAN') {
@@ -230,6 +240,13 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
     }
     await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+  }
+
+  private async collectClaimLineageAnchors(claimKey: string): Promise<readonly string[]> {
+    const business = await this.adapter.scanPublishedBusiness();
+    const heads = await this.adapter.getAll<StoredRecord>('heads');
+    const lineageRecords = [...business, ...heads].filter((record) => recordTargetsClaimKey(record, claimKey));
+    return [...new Set(lineageRecords.flatMap(identityAnchors))].sort();
   }
 
   async clear(): Promise<void> {
@@ -321,7 +338,29 @@ function recordsForCommit(commit: ImportCommit, asOf: number): StoredRecord[] {
   return entities.map((entity) => toStoredRecord(entity.id, entity.type, entity.payload, writtenAt));
 }
 
-function withoutClaim(commit: ImportCommit, claim: WorkModelClaim): ImportCommit {
+const LINEAGE_IDENTITY_FIELDS = [
+  'id', 'contentHash', 'commandId', 'baseRevisionId', 'resultClaimRevisionId', 'parentRevisionId',
+  'versionId', 'basedOnVersionId', 'causedByCorrectionId',
+] as const;
+
+function recordTargetsClaimKey(record: StoredRecord, claimKey: string): boolean {
+  if (!record.payload || typeof record.payload !== 'object') return false;
+  const payload = record.payload as Record<string, unknown>;
+  return payload.claimKey === claimKey || payload.targetClaimKey === claimKey || payload.knowledgeKey === claimKey;
+}
+
+function identityAnchors(record: StoredRecord): string[] {
+  const anchors = [record.recordId, record.contentHash];
+  if (!record.payload || typeof record.payload !== 'object') return anchors;
+  const payload = record.payload as Record<string, unknown>;
+  for (const field of LINEAGE_IDENTITY_FIELDS) {
+    if (typeof payload[field] === 'string') anchors.push(payload[field]);
+  }
+  return anchors;
+}
+
+function withoutClaim(commit: ImportCommit, claim: WorkModelClaim, lineageAnchors: readonly string[] = [claim.id]): ImportCommit {
+  const anchorSet = new Set(lineageAnchors);
   return Object.freeze({
     ...commit,
     output: Object.freeze({
@@ -331,7 +370,7 @@ function withoutClaim(commit: ImportCommit, claim: WorkModelClaim): ImportCommit
         ...commit.output.report,
         sections: Object.freeze({
           ...commit.output.report.sections,
-          learnedClaimIds: commit.output.report.sections.learnedClaimIds.filter((id) => id !== claim.id),
+          learnedClaimIds: commit.output.report.sections.learnedClaimIds.filter((id) => !anchorSet.has(id)),
         }),
       }),
     }),

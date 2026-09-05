@@ -482,7 +482,7 @@ export class IndexedDbM1bAdapter {
     }
   }
 
-  async planDeletion(target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string }, cause: DeletionPlanRecord['cause'] = 'user-delete'): Promise<DeletionPlanRecord> {
+  async planDeletion(target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchors?: readonly string[] },  cause: DeletionPlanRecord['cause'] = 'user-delete'): Promise<DeletionPlanRecord> {
     const db = await this.database();
     const tx = db.transaction([...ROOT_STORES], 'readonly');
     const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
@@ -537,6 +537,7 @@ export class IndexedDbM1bAdapter {
         targetId: plan.target.recordId,
         targetHash: plan.target.contentHash,
         targetType: plan.target.recordType,
+        targetAnchors: [...new Set([plan.target.recordId, plan.target.contentHash, ...(plan.target.lineageAnchors ?? [])])].sort(),
         baseCursor: plan.baseCursor,
         basePrivacyEpoch: plan.basePrivacyEpoch,
         enumeration: { registryIndex: 0, pageOffset: 0, complete: false, enumeratedCount: 0 },
@@ -593,7 +594,7 @@ export class IndexedDbM1bAdapter {
         const value = values[index];
         const key = keys[index];
         if (isOwnDeletionControl(root, key, value, journal) || root === 'meta') continue;
-        if (!deepContains(value, journal.targetId) && !deepContains(value, journal.targetHash)) continue;
+        if (!matchesDeletionTarget(value, journal)) continue;
         const work: DeletionWorkItemRecord = {
           id: `work:${deletionId}:${root}:${String(key)}`,
           deletionId,
@@ -994,7 +995,7 @@ export class IndexedDbM1bAdapter {
       let forbiddenReferenceCount = 0;
       values.forEach((value, index) => {
         if (isOwnDeletionControl(root, keys[index], value, journal)) return;
-        if (deepContains(value, journal.targetId) || deepContains(value, journal.targetHash)) forbiddenReferenceCount += 1;
+        if (matchesDeletionTarget(value, journal)) forbiddenReferenceCount += 1;
       });
       receipts.push({ rootId: `idb.${root}`, scannedItemCount: values.length, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
@@ -1002,7 +1003,7 @@ export class IndexedDbM1bAdapter {
     await transactionDone(tx);
     for (const root of [...this.inProcessRoots.values()].sort((a, b) => a.rootId.localeCompare(b.rootId))) {
       const values = root.read();
-      const forbiddenReferenceCount = values.filter((value) => deepContains(value, journal.targetId) || deepContains(value, journal.targetHash)).length;
+      const forbiddenReferenceCount = values.filter((value) => matchesDeletionTarget(value, journal)).length;
       receipts.push({ rootId: root.rootId, scannedItemCount: values.length, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
     }
@@ -1054,6 +1055,10 @@ export function toStoredRecord<T>(recordId: string, recordType: string, payload:
   return { ...base, contentHash: hashCanonical(base) };
 }
 
+function immutablePayloadHash(record: StoredRecord): Hash {
+  return hashCanonical({ recordType: record.recordType, payload: record.payload });
+}
+
 function validateBatch(batch: AtomicMutationBatch): void {
   if (batch.mutations.length > 500) throw new M1bError('ERR_BATCH_LIMIT');
   const actualStores = [...new Set(batch.mutations.map((mutation) => mutation.storeName))].sort();
@@ -1071,9 +1076,7 @@ async function applyMutation(tx: IDBTransaction, mutation: CanonicalMutation): P
     if (mutation.storeName === 'business' && payload && typeof payload === 'object' && 'dedupeKey' in payload && typeof payload.dedupeKey === 'string') {
       const existing = await requestValue<StoredRecord | undefined>(store.index('byDedupeKey').get(payload.dedupeKey));
       if (existing) {
-        const existingPayload = existing.payload;
-        const sameFact = existingPayload && typeof existingPayload === 'object' && 'factHash' in existingPayload
-          && 'factHash' in payload && existingPayload.factHash === payload.factHash;
+        const sameFact = immutablePayloadHash(existing) === immutablePayloadHash(mutation.record);
         if (sameFact) return { byteDelta: 0, change: { recordType: existing.recordType, recordId: existing.recordId, change: 'put', contentHash: existing.contentHash } };
         throw new M1bError('ERR_DUPLICATE_CONFLICT');
       }
@@ -1194,6 +1197,10 @@ function recordHash(value: unknown): Hash | undefined {
   return undefined;
 }
 
+function matchesDeletionTarget(value: unknown, journal: ActiveDeletionJournalRecord): boolean {
+  return (journal.targetAnchors ?? [journal.targetId, journal.targetHash]).some((anchor) => deepContains(value, anchor));
+}
+
 function deepContains(value: unknown, needle: string): boolean {
   if (value === needle) return true;
   if (Array.isArray(value)) return value.some((item) => deepContains(item, needle));
@@ -1251,12 +1258,15 @@ function normalizeIdbError(error: unknown): Error {
   return error instanceof Error ? error : new M1bError('ERR_STORAGE');
 }
 
+const DELETE_TIMEOUT_MS = 5_000;
+
 function deleteDatabase(name: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.deleteDatabase(name);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error ?? new M1bError('ERR_STORAGE'));
-    request.onblocked = () => undefined; // The request remains armed; settle only on success/error.
+    const timer = setTimeout(() => reject(new M1bError('ERR_STORAGE_BLOCKED')), DELETE_TIMEOUT_MS);
+    request.onsuccess = () => { clearTimeout(timer); resolve(); };
+    request.onerror = () => { clearTimeout(timer); reject(request.error ?? new M1bError('ERR_STORAGE')); };
+    request.onblocked = () => undefined;
   });
 }
 
@@ -1264,8 +1274,10 @@ function deleteDatabaseResult(name: string): Promise<boolean> {
   return new Promise((resolve) => {
     const request = indexedDB.deleteDatabase(name);
     let settled = false;
-    request.onsuccess = () => { if (!settled) { settled = true; resolve(true); } };
-    request.onerror = () => { if (!settled) { settled = true; resolve(false); } };
-    request.onblocked = () => undefined; // A blocked delete cannot be cancelled and may later succeed.
+    const settle = (value: boolean) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => settle(false), DELETE_TIMEOUT_MS);
+    request.onsuccess = () => { clearTimeout(timer); settle(true); };
+    request.onerror = () => { clearTimeout(timer); settle(false); };
+    request.onblocked = () => undefined;
   });
 }

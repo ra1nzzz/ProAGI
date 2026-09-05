@@ -17,8 +17,9 @@ const stateShortLabels: Readonly<Record<OrbState, string>> = {
 };
 
 export function AppShell() {
-  const [orbState, setOrbState] = useState<OrbState>('SUGGESTION');
-  const [previousState, setPreviousState] = useState<OrbState>('SUGGESTION');
+  const [orbState, setOrbState] = useState<OrbState>('IDLE');
+  const [previousState, setPreviousState] = useState<OrbState>('IDLE');
+  const [canonicalPrivate, setCanonicalPrivate] = useState(false);
   const [orbProfile, setOrbProfile] = useState<OrbProfile>('quiet');
   const [contentMode, setContentMode] = useState<ContentMode>('content');
   const [recovery, setRecovery] = useState<RecoveryKind | null>(null);
@@ -36,13 +37,14 @@ export function AppShell() {
   const [domainRevision, setDomainRevision] = useState(0);
 
   if (!runtimeRef.current) runtimeRef.current = new BrowserInsightRuntime();
-  const privateMode = orbState === 'PRIVATE';
+  const privateMode = canonicalPrivate;
 
   useEffect(() => {
     let active = true;
     void runtimeRef.current!.start().then((snapshot) => {
       if (!active) return;
       setImported(snapshot.imported);
+       setCanonicalPrivate(snapshot.observationMode === 'PRIVATE');
       if (snapshot.observationMode === 'PRIVATE') {
         setPreviousState('IDLE');
         setOrbState('PRIVATE');
@@ -100,7 +102,8 @@ export function AppShell() {
       const receipt = nextMode === 'PRIVATE'
         ? await runtimeRef.current!.pausePrivacy()
         : await runtimeRef.current!.resumePrivacy();
-      if (nextMode === 'PRIVATE') {
+      setCanonicalPrivate(nextMode === 'PRIVATE');
+       if (nextMode === 'PRIVATE') {
         setPreviewToken(null);
         setPreviousState(orbState === 'PRIVATE' ? 'IDLE' : orbState);
         setOrbState('PRIVATE');
@@ -116,9 +119,10 @@ export function AppShell() {
   };
 
   const chooseState = (state: OrbState) => {
+    // This isolated View Model picker is visual-only; canonical privacy gates use canonicalPrivate.
     if (state !== 'PRIVATE') setPreviousState(state);
     setOrbState(state);
-    setAnnouncement(`状态已切换：${ORB_STATE_LABELS[state]}`);
+    setAnnouncement(`演示状态已切换：${ORB_STATE_LABELS[state]}（不改变 canonical runtime）`);
   };
 
   const startRecovery = (invoker: HTMLElement, kind: RecoveryKind) => {
@@ -201,7 +205,7 @@ export function AppShell() {
       return;
     }
     const replay = runtimeRef.current!.evaluateReplay();
-    setDomainStatus(`Replay 完成：${replay.output.claims.length} 条 live Insight；snapshot ${replay.snapshotHash.slice(0, 20)}…`);
+    setDomainStatus(`Replay 完成：${replay.output.claims.length} 条 live Insight。`);
     setOrbState('SUGGESTION');
   };
 
@@ -230,6 +234,7 @@ export function AppShell() {
         <p className="brand-bar__boundary">Fixture 研究原型 · Shadow-only</p>
       </header>
 
+      <nav aria-label="主要导航" className="sr-only"><a href="#main-content">洞察主界面</a></nav>
       <main id="main-content" tabIndex={-1}>
         <section className="privacy-strip" aria-labelledby="privacy-title">
           <div className="privacy-strip__status" tabIndex={-1} data-global-status>
@@ -287,10 +292,10 @@ export function AppShell() {
             <p className="eyebrow">可运行 Insight Loop</p>
             <p className="domain-loop__status" role="status">{domainStatus}</p>
             <div className="button-row" aria-label="领域操作">
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim} onClick={() => applyCorrection('accept')}>接受 Insight</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim} onClick={() => applyCorrection('edit')}>编辑范围</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim} onClick={() => applyCorrection('delete')}>删除 Insight</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('accept')}>接受 Insight</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('edit')}>编辑范围</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('delete')}>删除 Insight</button>
               <button type="button" className="button button--primary" disabled={!imported} onClick={runDomainReplay}>运行 Replay</button>
             </div>
           </div>

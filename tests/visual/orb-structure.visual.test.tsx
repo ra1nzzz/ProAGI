@@ -19,7 +19,7 @@ afterEach(cleanup);
 describe('mood-board visual structure', () => {
   it('renders the seven-layer/eight-part liquid glass Orb instead of a flat circle', () => {
     const { container } = render(<App />);
-    const orb = screen.getByRole('button', { name: '有一条建议待审阅' });
+    const orb = screen.getByRole('button', { name: '本地观察已就绪' });
     const parts = orb.querySelectorAll('[data-orb-part]');
 
     expect(parts).toHaveLength(8);
@@ -59,7 +59,7 @@ describe('mood-board visual structure', () => {
     expect(container.querySelectorAll('.content-card')).toHaveLength(4);
     expect(container.querySelector('.replay-panel')).toBeInTheDocument();
 
-    const orb = screen.getByRole('button', { name: '有一条建议待审阅' });
+    const orb = screen.getByRole('button', { name: '本地观察已就绪' });
     expect(orb).toHaveAttribute('data-profile', 'quiet');
     fireEvent.click(orb);
     expect(orb).toHaveAttribute('data-profile', 'active');

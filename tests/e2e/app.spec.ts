@@ -88,14 +88,23 @@ test('runs bundled import, immutable correction, and Replay in the browser', asy
   await expect(page.locator('.domain-loop__status')).toContainText('Replay 完成');
 });
 
-test('delete purges only the claim lineage and preserves unrelated canonical records', async ({ page }) => {
+test('accept and edit then delete closes the full claimKey lineage across reload', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '预览本地样例' }).click();
   await page.getByRole('button', { name: '确认导入' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('已持久提交 4 条测试事件');
+  await page.getByRole('button', { name: '接受 Insight' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('accept 已持久写入不可变 revision');
+  await page.getByRole('button', { name: '编辑范围' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('edit 已持久写入不可变 revision');
+
   const before = await readStore(page, 'business') as Array<Record<string, unknown>>;
-  const target = before.find((record) => record.recordType === 'work_model_claim_v1');
-  expect(target).toBeDefined();
+  const claimsBefore = before.filter((record) => record.recordType === 'work_model_claim_v1');
+  expect(claimsBefore.length).toBeGreaterThan(1);
+  const lineageAnchors = before
+    .filter((record) => ['work_model_claim_v1', 'knowledge_version_v1', 'correction_record_v1'].includes(String(record.recordType)))
+    .flatMap((record) => [record.recordId, record.contentHash])
+    .filter((value): value is string => typeof value === 'string');
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
@@ -103,14 +112,18 @@ test('delete purges only the claim lineage and preserves unrelated canonical rec
   const after = await readStore(page, 'business') as Array<Record<string, unknown>>;
   expect(after.length).toBeGreaterThan(0);
   expect(after.some((record) => record.recordType === 'behavior_event_v1')).toBe(true);
-  expect(after.some((record) => record.recordType === 'work_model_claim_v1')).toBe(false);
-  expect(JSON.stringify(after)).not.toContain(String(target?.recordId));
-  expect(JSON.stringify(after)).not.toContain(String(target?.contentHash));
+  expect(after.some((record) => ['work_model_claim_v1', 'knowledge_version_v1', 'correction_record_v1', 'daily_report_snapshot_v1'].includes(String(record.recordType)))).toBe(false);
+  expect(await readStore(page, 'heads')).toEqual([]);
+  const serializedAfter = JSON.stringify(after);
+  for (const anchor of lineageAnchors) expect(serializedAfter).not.toContain(anchor);
 
   await page.reload();
   await expect(page.locator('.domain-loop__status')).toContainText('已从本地 canonical store 恢复');
   await expect(page.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
   await expect(page.locator('.claim-card__statement')).not.toContainText('在 demo-project 修改代码后运行测试');
+  const reopened = await readStore(page, 'business') as Array<Record<string, unknown>>;
+  expect(reopened.some((record) => ['work_model_claim_v1', 'knowledge_version_v1', 'correction_record_v1', 'daily_report_snapshot_v1'].includes(String(record.recordType)))).toBe(false);
+  expect(await readStore(page, 'heads')).toEqual([]);
 });
 
 test('Shadow preview invokes no browser effect sink', async ({ page }) => {

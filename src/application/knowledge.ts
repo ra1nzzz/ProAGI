@@ -58,7 +58,7 @@ export class InMemoryKnowledgePort implements KnowledgePort {
       if (!current || claim.revision > current.revision) this.claimHeads.set(claim.claimKey, claim.id);
     }
     for (const correction of snapshot.corrections) this.corrections.set(correction.id, deepFreeze(correction));
-    for (const key of snapshot.deletedClaimKeys) this.deleted.add(key);
+    for (const key of snapshot.deletedClaimKeys) this.deleteLineage(key);
   }
 
   currentClaim(claimKey: string): WorkModelClaim | undefined {

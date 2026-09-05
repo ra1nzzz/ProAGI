@@ -512,7 +512,7 @@ export class IndexedDbM1bAdapter {
       if (current.state === 'CLOSING') throw new M1bError('ERR_CLIENT_CLOSING');
       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
       const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
-      const quarantined = Boolean(active && !active.purge.sealedAt);
+      const quarantined = Boolean(active);
       const next = { ...current, state: quarantined ? 'QUARANTINED' as const : current.state, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString(), ...(active ? { purgeGeneration: active.purge.generation } : {}) };
       if (active && !active.purge.sealedAt && !active.purge.requiredClientIds.includes(clientId)) {
         tx.objectStore('journal').put(updateJournalHash({ ...active, purge: { ...active.purge, requiredClientIds: [...active.purge.requiredClientIds, clientId].sort() }, updatedAt: new Date(now).toISOString() }));

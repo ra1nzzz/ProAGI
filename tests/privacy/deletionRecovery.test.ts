@@ -100,6 +100,19 @@ describe('M1b deletion and recovery control plane', () => {
     await expect(adapter.renewClient('closing-client', now + 2)).rejects.toMatchObject({ code: 'ERR_CLIENT_CLOSING' });
   });
 
+  it('keeps a resumed client quarantined until the sealed journal is verified', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    await adapter.registerClient('resumed', now);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.acknowledgePurge(current.id, current.purge.generation, 'resumed', now + 2);
+    await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 3);
+    expect((await adapter.renewClient('resumed', now + 4)).state).toBe('QUARANTINED');
+  });
+
   it('renews an expired client into the active purge membership atomically', async () => {
     const adapter = createAdapter();
     await adapter.registerClient('client-a', now);

@@ -355,3 +355,10 @@
 - 恢复 blocked goal 后，按 YT review 修复最终 lease freshness 基础：`IndexedDbM1bAdapter` 支持注入 clock，`verifyDeletion` 在 audit 后使用注入时钟重新校验 lease；privacy 测试使用 deterministic clock，保持生产默认 `Date.now`。
 - 完整 PR/release 门禁通过：Vitest 63/63、Playwright 18/18、Smoke 2/2、worker/privacy nightly、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `55fe285`。
+
+## Goal Round 60
+
+- 为 in-process root registry 增加 monotonic revision 与 token-conditional dispose，防止同 rootId 的 ABA 替换被 audit 误判为稳定。
+- `auditRoots` 现在在扫描前后同时校验 registry revision；revision 变化时保持 `REGISTRY_INCOMPLETE`，禁止 CLEAN。
+- Release PR gate 通过：Vitest 63/63、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `2a0e023`。

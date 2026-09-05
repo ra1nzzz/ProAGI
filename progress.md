@@ -144,3 +144,10 @@
 - 实施级三维 YT audit 已输出 `docs/reviews/implementation-audit.md`；该文件不是 Review Round 6，文档 REVIEW 仍严格止于 5/5。
 - 最终本地门禁：11 个非空 suites；Vitest 14 files、57/57；Playwright Chromium desktop+320、16/16；typecheck、lint、CSP、audit(0 vulnerabilities)、production build 全部通过。
 - 新 Evidence Pack：`evidence/M1/2026-09-04T17-38-02-616Z/`，Gate 1 为 `CONDITIONAL`；NVDA、人工视觉批准、hosted CI、跨标签删除/PURGE 继续为 `NOT_RUN`。
+
+## Goal Round 1（执行与提交）
+
+- 使用 `gpt-5.6-luna` 完成三维 YT implementation review；审阅暴露的删除 lineage 复活风险已修复：accept→edit→delete→close→reopen 的 Playwright 场景现在覆盖完整 claimKey lineage、heads、versions、corrections 与 report 引用清除。
+- 修复删除失败时的 runtime hydrate 回滚、stale projection 写按钮门禁、空库 Orb 初始状态、live status hash 泄露、Cache clear 超时、dedupe 完整 payload 比较，并补充 `nav` landmark。
+- 按模块完成原子提交并推送到同名 GitHub 仓库：`https://github.com/ra1nzzz/ProAGI`；主要提交为 M1a、M1b、M1c 及 fix/test commits。
+- 最终验证：11 suites、Vitest 57/57、Playwright 16/16、typecheck/lint/CSP/audit/build 全部通过；但跨标签删除/PURGE 应用接线仍是后续 P0，目标保持 active。

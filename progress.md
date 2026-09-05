@@ -368,3 +368,9 @@
 - 最终 verifyDeletion Tv 增加 audit receipt 的 registryRevision 绑定，并在事务内再次比较当前 revision；root registry 发生变化时拒绝最终验证。
 - Release PR gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `cd88368`。
+
+## Goal Round 70–71
+
+- 增加 audit receipt regression：`REGISTRY_INCOMPLETE` 审计结果必须携带 registry revision，确保最终验证协议具备可绑定的 revision 数据。
+- Release PR gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `e9f5b4b`。

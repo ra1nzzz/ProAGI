@@ -222,11 +222,13 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     if (!result.ok) return result;
 
     if (action === 'delete') {
+      let deleteRetried = false;
       try {
         await this.deleteClaimLineage(current);
         return result;
       } catch (error) {
         await this.hydrate();
+        if (!deleteRetried && (error as { code?: string }).code === 'ERR_CURSOR_CONFLICT') { deleteRetried = true; await this.deleteClaimLineage(current); return result; }
         throw error;
       }
     }

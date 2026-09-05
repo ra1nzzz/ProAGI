@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./tests/setup.ts'],
+    fileParallelism: false,
     exclude: ['tests/e2e/**', 'node_modules/**', 'dist/**'],
     coverage: { reporter: ['text', 'json-summary'] }
   }

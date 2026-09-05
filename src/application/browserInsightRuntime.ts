@@ -32,6 +32,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private readonly purgeChannel: BroadcastChannel | null = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1');
   private clientRenewal: ReturnType<typeof setInterval> | null = null;
   private operationGeneration = 0;
+  private readonly purgeReleases = new Set<string>();
   private service = new InsightLoopService();
   private imported: ImportCommit | null = null;
   private started = false;
@@ -49,6 +50,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   private async releaseForPurge(deletionId: string, generation: string): Promise<void> {
+    const releaseKey = `${deletionId}:${generation}`;
+    if (this.purgeReleases.has(releaseKey)) return;
+    this.purgeReleases.add(releaseKey);
     const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal').catch(() => []);
     const journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
     if (!journal || journal.state === 'FAILED' || journal.purge.sealedAt) return;
@@ -143,7 +147,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   private async createBundledPreview(now: number): Promise<ImportCommit> {
+    const generation = this.operationGeneration;
     const meta = await this.adapter.getMeta();
+    if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
     if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
     const candidate = new InsightLoopService();
     const preview = candidate.preview(developerDayFixtureJson, now);
@@ -154,6 +160,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       bytes: new TextEncoder().encode(developerDayFixtureJson), privacyEpoch: meta.privacyEpoch,
       expiresAt: new Date(now + 60_000).toISOString(),
     });
+    if (generation !== this.operationGeneration) {
+      await this.adapter.cancelPreview(staged.token).catch(() => undefined);
+      throw new Error('ERR_OPERATION_STALE');
+    }
     const records = recordsForCommit(receipt.result, now);
     const batch = makeBatch({
       idempotencyKey, expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch,
@@ -165,7 +175,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   async commitBundled(options: { simulateResponseLoss?: boolean } = {}): Promise<ImportCommit> {
+    const generation = this.operationGeneration;
     await this.start();
+    if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
     if (this.imported) return this.imported;
     const pending = this.pendingPreview;
     if (!pending) throw new Error('ERR_PREVIEW_REQUIRED');

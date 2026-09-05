@@ -365,3 +365,6 @@
 - 补充 same-key ABA regression：替换同一 rootId 后，registry revision 变化会阻断 CLEAN。
 - Release gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `0aa0302`。
+- 最终 verifyDeletion Tv 增加 audit receipt 的 registryRevision 绑定，并在事务内再次比较当前 revision；root registry 发生变化时拒绝最终验证。
+- Release PR gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `cd88368`。

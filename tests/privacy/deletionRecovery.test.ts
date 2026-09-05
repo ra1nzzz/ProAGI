@@ -127,6 +127,7 @@ describe('M1b deletion and recovery control plane', () => {
 
     const retried = await adapter.retryPurge(current.id, 'owner', fenced.lease.fencingToken, ['client-a'], now + 5);
     expect(retried.purge.generation).not.toBe(current.purge.generation);
+    expect(retried.purge.requiredClientIds).toEqual(['client-a', 'client-b']);
     await expect(adapter.acknowledgePurge(current.id, current.purge.generation, 'client-b', now + 6)).rejects.toMatchObject({ code: 'ERR_PURGE_GENERATION_STALE' });
   });
 

@@ -876,6 +876,7 @@ export class IndexedDbM1bAdapter {
       await assertLease(tx, ownerClientId, fencingToken, verificationClock);
       const journalStore = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
+      if (audit.registryRevision !== this.rootRevision) throw new M1bError('ERR_DELETE_REGISTRY_INCOMPLETE');
       if (!journal || journal.state !== 'FINALIZING' || !journal.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');
       const verifiedId = crypto.randomUUID();
       const tombstoneId = crypto.randomUUID();
@@ -1079,6 +1080,7 @@ export class IndexedDbM1bAdapter {
       reachableCount,
       allRequiredClientsPurged: true,
       registryComplete,
+       registryRevision: registryBeforeRevision,
       outcome: !registryComplete ? 'REGISTRY_INCOMPLETE' : reachableCount === 0 ? 'CLEAN' : 'REACHABLE',
       coverage: 'single-browser-in-process',
     };

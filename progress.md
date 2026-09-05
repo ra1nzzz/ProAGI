@@ -217,3 +217,10 @@
 - 加入 BroadcastChannel 不可用时的 fail-safe：若仍有其他 required client，删除流程显式进入 `ERR_PURGE_CLIENTS_PENDING`，避免无 channel 时错误宣称完成。
 - 按 yt-dev-review 完成回归：privacy 7/7、a11y 7/7；完整门禁重跑通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `1ff81de`；当前工作树干净。
+
+## Goal Round 13
+
+- 继续按 YT review 修复 purge race：PURGE receiver 对 deletion+generation 做 single-flight；即使请求在 journal sealed 后延迟到达，仍先清理本地 runtime/UI roots，只有未 sealed 时才写 ACK。
+- `renewClient` 拒绝 CLOSING registration，避免关闭后的迟到 heartbeat 重新加入 purge membership。
+- 重新执行完整门禁：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `8c0f12c`。

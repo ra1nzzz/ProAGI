@@ -211,3 +211,9 @@
 - 为不可逆删除补充 Playwright 取消路径：打开 accessible alertdialog、确认标题/说明、取消后保持原 Insight 可操作，再重新确认删除。
 - YT 修复后的完整门禁通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `e4187db`。
+
+## Goal Round 11–12
+
+- 加入 BroadcastChannel 不可用时的 fail-safe：若仍有其他 required client，删除流程显式进入 `ERR_PURGE_CLIENTS_PENDING`，避免无 channel 时错误宣称完成。
+- 按 yt-dev-review 完成回归：privacy 7/7、a11y 7/7；完整门禁重跑通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `1ff81de`；当前工作树干净。

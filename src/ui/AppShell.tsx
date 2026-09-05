@@ -26,6 +26,7 @@ export function AppShell() {
   const [announcement, setAnnouncement] = useState('');
   const [detailOpen, setDetailOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletionBusy, setDeletionBusy] = useState(false);
   const recoveryInvokerRef = useRef<HTMLElement>(null);
   const detailInvokerRef = useRef<HTMLElement>(null);
   const deleteInvokerRef = useRef<HTMLButtonElement>(null);
@@ -210,7 +211,9 @@ export function AppShell() {
   };
 
   const performCorrection = async (action: Exclude<CorrectionAction, 'restore'>) => {
+    if (action === 'delete') setDeletionBusy(true);
     if (!runtimeRef.current!.currentClaim()) {
+      if (action === 'delete') setDeletionBusy(false);
       setDomainStatus('没有可纠正的 live Insight。');
       return;
     }
@@ -225,11 +228,13 @@ export function AppShell() {
         ? (action === 'delete' ? 'Insight lineage 已从本地 canonical store 删除；无关事件与报告已保留。' : `${action} 已持久写入不可变 revision；可运行 Replay 验证。`)
         : `纠正未保存：${result.record.errorCode ?? 'unknown'}`);
       setAnnouncement(result.ok ? '纠正已持久保存。' : '纠正尚未保存。');
+      if (action === 'delete') setDeletionBusy(false);
     } catch (error) {
       const code = safeErrorCode(error);
       if (code === 'ERR_PURGE_CLIENTS_PENDING') setRecovery('blocked');
       setOrbState('ERROR');
       setDomainStatus(`纠正事务失败（${code}）；未显示成功。`);
+      if (action === 'delete') setDeletionBusy(false);
     }
   };
 
@@ -337,7 +342,7 @@ export function AppShell() {
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('accept')}>接受 Insight</button>
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('edit')}>编辑范围</button>
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={(event) => { deleteInvokerRef.current = event.currentTarget; void applyCorrection('delete'); }}>删除 Insight</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale' || deletionBusy} onClick={(event) => { deleteInvokerRef.current = event.currentTarget; void applyCorrection('delete'); }}>删除 Insight</button>
               <button type="button" className="button button--primary" disabled={!imported} onClick={runDomainReplay}>运行 Replay</button>
             </div>
           </div>

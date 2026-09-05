@@ -349,3 +349,9 @@
 - 新增 regression 覆盖 sealed journal renewal quarantine。
 - Release gate 通过：Vitest 63/63、Playwright 18/18、smoke 2/2、worker/privacy nightly、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `c594c90`。
+
+## Goal Round 54–59
+
+- 恢复 blocked goal 后，按 YT review 修复最终 lease freshness 基础：`IndexedDbM1bAdapter` 支持注入 clock，`verifyDeletion` 在 audit 后使用注入时钟重新校验 lease；privacy 测试使用 deterministic clock，保持生产默认 `Date.now`。
+- 完整 PR/release 门禁通过：Vitest 63/63、Playwright 18/18、Smoke 2/2、worker/privacy nightly、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `55fe285`。

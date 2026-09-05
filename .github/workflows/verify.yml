@@ -1,0 +1,57 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install pinned Chromium runtime
+        run: npx playwright install --with-deps chromium
+      - name: Verify pull request tier
+        if: github.event_name != 'schedule'
+        shell: bash
+        run: |
+          mkdir -p evidence-logs
+          npm run verify:pr 2>&1 | tee evidence-logs/verify-pr.log
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Verify nightly tier
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          mkdir -p evidence-logs
+          npm run verify:nightly 2>&1 | tee evidence-logs/verify-pr.log
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Create evidence manifest
+        if: always()
+        env:
+          EVIDENCE_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [ "${{ job.status }}" = "failure" ]; then export EVIDENCE_STATUS=FAIL VERIFY_PR_EXIT_CODE=1; else export EVIDENCE_STATUS=CONDITIONAL VERIFY_PR_EXIT_CODE=0; fi
+          npm run evidence:init
+      - name: Upload evidence with bounded retention
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proagi-m1-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/M1/
+            test-results/
+            evidence-logs/
+          if-no-files-found: error
+          retention-days: 14

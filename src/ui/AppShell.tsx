@@ -28,6 +28,7 @@ export function AppShell() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const recoveryInvokerRef = useRef<HTMLElement>(null);
   const detailInvokerRef = useRef<HTMLElement>(null);
+  const deleteInvokerRef = useRef<HTMLButtonElement>(null);
   const detailDrawerRef = useRef<HTMLElement>(null);
   const detailCloseRef = useRef<HTMLButtonElement>(null);
   const runtimeRef = useRef<BrowserInsightRuntime | null>(null);
@@ -107,6 +108,25 @@ export function AppShell() {
       if (returnTarget?.isConnected) returnTarget.focus();
     };
   }, [detailOpen]);
+
+  useEffect(() => {
+    if (!deleteConfirmOpen) return;
+    const returnTarget = deleteInvokerRef.current;
+    const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
+    const cancel = dialog?.querySelector<HTMLButtonElement>('button');
+    cancel?.focus();
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setDeleteConfirmOpen(false); return; }
+      if (event.key !== 'Tab' || !dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).filter((el) => !el.disabled);
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => { document.removeEventListener('keydown', handleKeyDown); if (returnTarget?.isConnected) returnTarget.focus(); };
+  }, [deleteConfirmOpen]);
 
   const togglePrivacy = async () => {
     const nextMode = privateMode ? 'ACTIVE' : 'PRIVATE';
@@ -317,7 +337,7 @@ export function AppShell() {
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('accept')}>接受 Insight</button>
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('edit')}>编辑范围</button>
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('delete')}>删除 Insight</button>
+              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={(event) => { deleteInvokerRef.current = event.currentTarget; void applyCorrection('delete'); }}>删除 Insight</button>
               <button type="button" className="button button--primary" disabled={!imported} onClick={runDomainReplay}>运行 Replay</button>
             </div>
           </div>

@@ -224,3 +224,10 @@
 - `renewClient` 拒绝 CLOSING registration，避免关闭后的迟到 heartbeat 重新加入 purge membership。
 - 重新执行完整门禁：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `8c0f12c`。
+
+## Goal Round 14
+
+- 修复动态 in-process root audit TOCTOU：扫描前后 registry key 集合变化时返回 `REGISTRY_INCOMPLETE`，禁止误报 CLEAN/FINALIZING。
+- 识别 Vitest/Playwright 共享 IndexedDB 并行隔离缺陷：Vitest 设置 `fileParallelism: false`，Playwright 设置 `workers: 1`，默认门禁稳定化。
+- 完整门禁通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送 `d222565` 与 `112a52f`。

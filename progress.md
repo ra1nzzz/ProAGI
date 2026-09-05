@@ -283,3 +283,10 @@
 - RecoverySurface、runtime recovery 与 adapter membership invariant 完成回归。
 - 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `c1adb35`。
+
+## Goal Round 27
+
+- 为 `BrowserInsightRuntime.recover()` 增加 integration contract regression：无 active deletion journal 时 recovery 必须安全 no-op，不得改变 canonical state。
+- ControlPort recovery contract、RecoverySurface 接线与 adapter state machine 完成回归。
+- 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `ea1683a`。

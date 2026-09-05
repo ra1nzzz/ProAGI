@@ -158,3 +158,11 @@
 - 修复删除失败时的 hydrate 回滚、same-tab application root 在 audit 前释放、dedupe 完整 payload 比较、blocked clear timeout、空库 Orb 状态、stale correction 禁用与 hash live-region 暴露。
 - 修复 `test-after-change-v1` 因果顺序漏洞：必须存在按 canonical 顺序排列的 file.changed→passed test；逆序负例已加入 Replay 测试。
 - 本轮已推送原子提交：`466dd07`（M1a 因果顺序修复）。最新工作树干净；跨标签删除/PURGE 应用接线仍待最小安全实现，尚不可宣称完整目标完成。
+
+## Goal Round 3
+
+- 在 BrowserInsightRuntime 接入每标签 client registration 与 BroadcastChannel `PURGE_REQUEST`：收到其他标签清除事件时先释放 runtime/imported 与 React DOM 状态，再写 purge ACK；发起删除的标签在 audit 前广播、ACK 自身并等待 peers。
+- 新增真实 Chromium 双标签 deletion E2E，验证第二标签释放旧 lineage/a11y 状态后，第一标签才完成 purge audit；desktop 与 320 均通过。
+- 修正 registerClient 只识别 active deletion journal，避免把 journal work records 误判为活动删除。
+- 最新完整门禁：11 suites、Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 通过 `1a0ca9b` 原子提交并已 PUSH；复审后工作树干净，下一步继续做模块级 YT 复审与必要修订。

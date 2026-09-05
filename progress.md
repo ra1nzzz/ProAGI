@@ -205,3 +205,9 @@
 - 为 runtime start/close 增加 operation-generation fence：close 期间未完成的 start 不得重新注册、创建 heartbeat 或将 runtime 标记为 started。
 - Recovery blocked UI 与 lease regression 保持通过；新增提交前 YT 修复后完整门禁：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送 `de1bb2e`；本轮结束前重新生成 Evidence Pack。
+
+## Goal Round 10
+
+- 为不可逆删除补充 Playwright 取消路径：打开 accessible alertdialog、确认标题/说明、取消后保持原 Insight 可操作，再重新确认删除。
+- YT 修复后的完整门禁通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `e4187db`。

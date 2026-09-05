@@ -166,3 +166,12 @@
 - 修正 registerClient 只识别 active deletion journal，避免把 journal work records 误判为活动删除。
 - 最新完整门禁：11 suites、Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 通过 `1a0ca9b` 原子提交并已 PUSH；复审后工作树干净，下一步继续做模块级 YT 复审与必要修订。
+
+## Goal Round 4
+
+- 根据三维 YT 复审修复 client lease 单次注册问题：加入 2 秒 heartbeat 与安全关闭路径。
+- `QUARANTINED` 客户端启动时禁止 hydrate/render，并检查持久 active deletion journal 后完成 ACK。
+- purge receiver 先校验 journal/generation，再取消 pending preview、递增 operation generation、释放 runtime 状态，之后才写 ACK。
+- hydrate 增加 operation-generation fence，避免旧异步读取在 purge 后重新发布数据。
+- 新增跨标签删除 E2E 后再次完成完整门禁：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `3f2ce73`；当前工作树干净，等待本轮最终 YT 复审结果。

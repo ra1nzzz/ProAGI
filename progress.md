@@ -245,3 +245,9 @@
 - 修复 cross-tab E2E 间歇性 `ERR_CURSOR_CONFLICT`：第二次删除前 bounded retry，并确保 owner application knowledge root 在 audit 前释放。
 - 完整门禁再次通过：Vitest 60/60、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送 `d850a16`、`2cb460d`、`7474267`。
+
+## Goal Round 17
+
+- 新增 closing client heartbeat 终态 regression：`CLOSING` client 的迟到 renewal 必须拒绝，不能重新进入 purge membership。
+- 通过 YT review 后的完整门禁：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `7bc0be6`。

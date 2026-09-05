@@ -363,6 +363,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
     if (journal.state === 'PURGE_PENDING') {
       journal = await this.adapter.retryPurge(journal.id, this.clientId, lease.fencingToken, [], Date.now());
+      this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
       await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
     }
     if (journal.state === 'PURGE_PENDING' || journal.state === 'AUDITING') {

@@ -53,7 +53,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const releaseKey = `${deletionId}:${generation}`;
     if (this.purgeReleases.has(releaseKey)) return;
     this.purgeReleases.add(releaseKey);
-    const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal').catch(() => []);
+    try {
+      const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
     const journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
     if (!journal || journal.state === 'FAILED') return;
     this.operationGeneration += 1;
@@ -64,6 +65,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.service = new InsightLoopService();
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
     if (!journal.purge.sealedAt) await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
+    } catch {
+      this.purgeReleases.delete(releaseKey);
+    }
   }
 
   async start(): Promise<BrowserRuntimeSnapshot> {

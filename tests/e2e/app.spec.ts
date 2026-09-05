@@ -172,6 +172,7 @@ test('a second tab releases deleted lineage before purge audit completes', async
   const secondTab = await context.newPage();
   await secondTab.goto('/');
   await expect(secondTab.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
+  await expect(secondTab.locator('.domain-loop__status')).toContainText('已从本地 canonical store 恢复');
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await expect(page.getByRole('alertdialog')).toBeVisible();

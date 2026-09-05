@@ -317,3 +317,10 @@
 - recovery takeover 在 retryPurge 产生新 generation 后主动广播 `PURGE_REQUEST`，让其他 live peers 能发现并 ACK replacement generation。
 - 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `de4f502`。
+
+## Goal Round 37–38
+
+- 完成 YT review 后修复：FAILED journal 启动 fail-closed、recovery FINALIZING checkpoint、replacement generation 广播。
+- Playwright webServer 改为 `npm run build && npm run preview`，E2E 现在直接验证 production dist，而非 Vite dev server；新增 `preview` script。
+- 生产 preview E2E：18/18；完整门禁：Vitest 62/62、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `c1f8f93`。

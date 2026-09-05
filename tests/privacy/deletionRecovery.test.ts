@@ -7,7 +7,7 @@ const adapters: IndexedDbM1bAdapter[] = [];
 const now = Date.parse('2025-01-01T00:00:00.000Z');
 
 function createAdapter(): IndexedDbM1bAdapter {
-  const adapter = new IndexedDbM1bAdapter();
+  const adapter = new IndexedDbM1bAdapter(undefined, () => now);
   adapters.push(adapter);
   return adapter;
 }

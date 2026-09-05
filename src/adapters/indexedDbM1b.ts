@@ -63,7 +63,7 @@ export class IndexedDbM1bAdapter {
   private readonly previewBuffers = new Map<Hash, BufferedPreview>();
   private readonly inProcessRoots = new Map<string, RegisteredRoot>();
 
-  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`) {}
+  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now) {}
 
   async open(): Promise<void> {
     if (this.db) return;
@@ -861,10 +861,11 @@ export class IndexedDbM1bAdapter {
     if (!before || before.state !== 'FINALIZING' || !before.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');
     const audit = await this.auditRoots(before);
     if (audit.outcome !== 'CLEAN') throw new M1bError('ERR_DELETE_REACHABLE');
+    const verificationClock = this.clock();
     const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
-      await assertLease(tx, ownerClientId, fencingToken, now);
+      await assertLease(tx, ownerClientId, fencingToken, verificationClock);
       const journalStore = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
       if (!journal || journal.state !== 'FINALIZING' || !journal.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');

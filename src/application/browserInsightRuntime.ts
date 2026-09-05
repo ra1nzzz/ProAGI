@@ -340,6 +340,36 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     await this.start();
   }
 
+  async recover(): Promise<void> {
+    await this.start();
+    const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
+    let journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
+    if (!journal) return;
+    const lease = await this.adapter.stealRecoveryLease(this.clientId, Date.now());
+    while (journal.state === 'FENCED' || journal.state === 'DELETING') {
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+      journal = journal.state === 'FENCED'
+        ? await this.adapter.enumerateDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now())
+        : await this.adapter.deleteChunk(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+    }
+    if (journal.state === 'PURGE_PENDING') {
+      journal = await this.adapter.retryPurge(journal.id, this.clientId, lease.fencingToken, [], Date.now());
+      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
+    }
+    await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+    const audit = await this.adapter.sealAndAudit(journal.id, this.clientId, lease.fencingToken, Date.now());
+    if (audit.outcome !== 'CLEAN') throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : 'ERR_DELETE_REACHABLE');
+    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+    while (!finalizing.finalizing.complete) {
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+      finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+    }
+    await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+    await this.adapter.verifyDeletion(journal.id, this.clientId, lease.fencingToken, Date.now());
+    this.imported = null;
+    this.service = new InsightLoopService();
+  }
+
   replay() {
     if (!this.imported) throw new Error('ERR_NOT_FOUND');
     return this.service.replay();

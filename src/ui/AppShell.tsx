@@ -312,7 +312,7 @@ export function AppShell() {
           <RecoverySurface
             kind={recovery}
             returnFocusRef={recoveryInvokerRef}
-            onRetry={() => setRecovery('recovery')}
+            onRetry={() => { void runtimeRef.current?.recover().then(() => { setRecovery(null); setDomainStatus('本地删除恢复已完成。'); }).catch((error) => setDomainStatus(`恢复未完成（${safeErrorCode(error)}）；普通写入保持暂停。`)); }}
             onDismissDemo={endRecovery}
           />
         ) : null}

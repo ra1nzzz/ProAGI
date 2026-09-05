@@ -164,6 +164,26 @@ describe('M1b deletion and recovery control plane', () => {
     unregister();
   });
 
+  it('rejects same-key root replacement during audit as an ABA mutation', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    let replaced = false;
+    const dispose = adapter.registerInProcessRoot('aba-root', () => {
+      if (!replaced) {
+        replaced = true;
+        dispose?.();
+        adapter.registerInProcessRoot('aba-root', () => [{ selectedId: target.recordId }]);
+      }
+      return [];
+    });
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    const result = await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    expect(result.outcome).toBe('REGISTRY_INCOMPLETE');
+  });
+
   it('never seals clean when the in-process root registry changes during audit', async () => {
     const adapter = createAdapter();
     const target = await seedTarget(adapter);

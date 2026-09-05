@@ -270,3 +270,9 @@
 - RecoverySurface 的“重试恢复”接入真实 runtime recovery，不再只是切换演示状态。
 - 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `1340ab0`；当前工作树干净。
+
+## Goal Round 25
+
+- 为 retryPurge 增加 membership invariant 断言：即使调用者传入缩减列表，事务内仍保留 active/quarantined client 全集。
+- 完整门禁通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `1c8110d`。

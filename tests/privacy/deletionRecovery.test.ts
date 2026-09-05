@@ -93,6 +93,18 @@ describe('M1b deletion and recovery control plane', () => {
     await expect(adapter.enumerateDeletionPage(journal.id, 'owner-b', stolen.fencingToken, 10, now + 7_001)).resolves.toBeDefined();
   });
 
+  it('renews an expired client into the active purge membership atomically', async () => {
+    const adapter = createAdapter();
+    await adapter.registerClient('client-a', now);
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now + 1);
+    const renewed = await adapter.renewClient('client-a', now + 7_000);
+    expect(renewed.state).toBe('QUARANTINED');
+    const current = await adapter.getRecord<ActiveDeletionJournalRecord>('journal', fenced.journal.id);
+    expect(current?.purge.requiredClientIds).toContain('client-a');
+  });
+
   it('quarantines late clients and invalidates old ACKs after retryPurge', async () => {
     const adapter = createAdapter();
     await adapter.registerClient('client-a', now - 1);

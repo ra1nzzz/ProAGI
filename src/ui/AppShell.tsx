@@ -206,8 +206,10 @@ export function AppShell() {
         : `纠正未保存：${result.record.errorCode ?? 'unknown'}`);
       setAnnouncement(result.ok ? '纠正已持久保存。' : '纠正尚未保存。');
     } catch (error) {
+      const code = safeErrorCode(error);
+      if (code === 'ERR_PURGE_CLIENTS_PENDING') setRecovery('blocked');
       setOrbState('ERROR');
-      setDomainStatus(`纠正事务失败（${safeErrorCode(error)}）；未显示成功。`);
+      setDomainStatus(`纠正事务失败（${code}）；未显示成功。`);
     }
   };
 

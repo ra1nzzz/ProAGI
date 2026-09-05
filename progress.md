@@ -251,3 +251,9 @@
 - 新增 closing client heartbeat 终态 regression：`CLOSING` client 的迟到 renewal 必须拒绝，不能重新进入 purge membership。
 - 通过 YT review 后的完整门禁：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `7bc0be6`。
+
+## Goal Round 18–19
+
+- 补充删除确认 dialog 的 Escape 关闭与 invoker focus restoration Playwright 覆盖。
+- 短暂 TLS 故障恢复后成功 push `1bef614`；完整门禁恢复通过：Vitest 61/61、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 最新 cross-tab E2E 使用单 worker、重复运行稳定通过；工作树保持干净。

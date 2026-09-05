@@ -80,9 +80,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
           await this.adapter.closeClient(this.clientId).catch(() => undefined);
           return;
         }
+        const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
+        const failed = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state === 'FAILED');
+        if (failed) {
+          await this.adapter.closeClient(this.clientId).catch(() => undefined);
+          throw new Error('ERR_RECOVERY_FAILED');
+        }
         this.clientRenewal ??= setInterval(() => { void this.adapter.renewClient(this.clientId).catch(() => undefined); }, 2_000);
         if (registration.state === 'QUARANTINED') {
-          const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
           const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
           this.imported = null;
           this.service = new InsightLoopService();

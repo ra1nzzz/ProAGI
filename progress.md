@@ -305,3 +305,9 @@
 - 已推送 `cfb3b25`；当前工作树干净。
 - 修正 recovery orchestrator：`FINALIZING` checkpoint 不再错误回调用仅接受 PURGE_PENDING/AUDITING 的 `sealAndAudit`，可直接续做 finalization。
 - 已推送原子提交 `1fcac98`。
+
+## Goal Round 35
+
+- 修复 FAILED deletion journal 启动路径：检测到 FAILED active journal 时关闭 client 并抛出 `ERR_RECOVERY_FAILED`，禁止 hydrate canonical business data，保持 fail-closed。
+- 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `f59de79`。

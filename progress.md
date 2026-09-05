@@ -311,3 +311,9 @@
 - 修复 FAILED deletion journal 启动路径：检测到 FAILED active journal 时关闭 client 并抛出 `ERR_RECOVERY_FAILED`，禁止 hydrate canonical business data，保持 fail-closed。
 - 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `f59de79`。
+
+## Goal Round 36
+
+- recovery takeover 在 retryPurge 产生新 generation 后主动广播 `PURGE_REQUEST`，让其他 live peers 能发现并 ACK replacement generation。
+- 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送原子提交 `de4f502`。

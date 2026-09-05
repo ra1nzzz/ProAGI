@@ -32,7 +32,7 @@
     "verify:csp": "node scripts/check-csp.mjs",
     "smoke": "npm run build && playwright test tests/e2e/app.spec.ts --grep \"renders the canonical\"",
     "verify": "npm run verify:pr",
-    "verify:pr": "npm run check:suites && npm run typecheck && npm run lint && npm run verify:csp && npm audit --audit-level=high && npm run test && npm run build && npm run test:e2e",
+    "verify:pr": "npm run check:suites && npm run typecheck && npm run lint && npm run verify:csp && npm audit --audit-level=high && npm run test && npm run build && npm run test:e2e && npm run smoke",
     "verify:nightly": "npm run verify:pr && npm run test:privacy && npm run test:worker-contract",
     "verify:release": "npm run verify:nightly && npm run smoke"
   },

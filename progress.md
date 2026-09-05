@@ -296,3 +296,10 @@
 - 修正 RecoverySurface blocked 文案：从误导性的 `CLEAR ONLY` 改为准确的 `PURGE PENDING · 等待释放`，并明确关闭/等待其他标签后重试恢复。
 - 完整门禁通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送原子提交 `546615a`。
+
+## Goal Round 29–34
+
+- 完成最新状态复核与 final YT review 汇总，确认 remaining risks 为最终 verifyDeletion TOCTOU、冻结标签持久 generation fence、完整 fault-injection coverage。
+- 完善 purge receiver 失败重试标记，扩展 cross-tab barrier E2E 等待窗口，避免 ACK 延迟被测试默认 timeout 掩盖。
+- 完整门禁再次通过：Vitest 62/62、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送 `cfb3b25`；当前工作树干净。

@@ -362,3 +362,6 @@
 - `auditRoots` 现在在扫描前后同时校验 registry revision；revision 变化时保持 `REGISTRY_INCOMPLETE`，禁止 CLEAN。
 - Release PR gate 通过：Vitest 63/63、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `2a0e023`。
+- 补充 same-key ABA regression：替换同一 rootId 后，registry revision 变化会阻断 CLEAN。
+- Release gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `0aa0302`。

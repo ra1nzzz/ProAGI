@@ -225,6 +225,7 @@ export interface ReachabilityResult {
   registryComplete: boolean;
   outcome: 'CLEAN' | 'REACHABLE' | 'CLIENTS_PENDING' | 'REGISTRY_INCOMPLETE';
   coverage: 'single-browser-in-process';
+  registryRevision?: number;
 }
 
 export interface ClearAllResult {

@@ -47,6 +47,7 @@ interface CommitOptions {
 
 interface RegisteredRoot {
   readonly rootId: string;
+  readonly revision: number;
   readonly read: () => readonly unknown[];
 }
 
@@ -62,6 +63,7 @@ export class IndexedDbM1bAdapter {
   private opening?: Promise<IDBDatabase>;
   private readonly previewBuffers = new Map<Hash, BufferedPreview>();
   private readonly inProcessRoots = new Map<string, RegisteredRoot>();
+  private rootRevision = 0;
 
   constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now) {}
 
@@ -118,8 +120,14 @@ export class IndexedDbM1bAdapter {
 
   registerInProcessRoot(rootId: string, read: () => readonly unknown[]): () => void {
     if (this.inProcessRoots.has(rootId)) throw new M1bError('ERR_DUPLICATE_ROOT');
-    this.inProcessRoots.set(rootId, { rootId, read });
-    return () => this.inProcessRoots.delete(rootId);
+    const revision = ++this.rootRevision;
+    const entry = { rootId, revision, read };
+    this.inProcessRoots.set(rootId, entry);
+    return () => {
+      if (this.inProcessRoots.get(rootId)?.revision !== revision) return;
+      this.inProcessRoots.delete(rootId);
+      this.rootRevision += 1;
+    };
   }
 
   getRuntimeContract(): M1bRuntimeContract {
@@ -1043,6 +1051,7 @@ export class IndexedDbM1bAdapter {
     const tx = db.transaction([...ROOT_STORES], 'readonly');
     const receipts: { rootId: string; scannedItemCount: number; forbiddenReferenceCount: number }[] = [];
     const registryBefore = [...this.inProcessRoots.keys()].sort();
+    const registryBeforeRevision = this.rootRevision;
     let reachableCount = 0;
     for (const root of ROOT_STORES) {
       const { keys, values } = await entries(tx.objectStore(root));
@@ -1062,7 +1071,7 @@ export class IndexedDbM1bAdapter {
       reachableCount += forbiddenReferenceCount;
     }
     const registryAfter = [...this.inProcessRoots.keys()].sort();
-    const registryComplete = registryBefore.length === registryAfter.length && registryBefore.every((rootId, index) => rootId === registryAfter[index]);
+    const registryComplete = registryBeforeRevision === this.rootRevision && registryBefore.length === registryAfter.length && registryBefore.every((rootId, index) => rootId === registryAfter[index]);
     return {
       deletionId: journal.id,
       generation: journal.purge.generation,

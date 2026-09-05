@@ -175,3 +175,12 @@
 - hydrate 增加 operation-generation fence，避免旧异步读取在 purge 后重新发布数据。
 - 新增跨标签删除 E2E 后再次完成完整门禁：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `3f2ce73`；当前工作树干净，等待本轮最终 YT 复审结果。
+
+## Goal Round 5–6
+
+- 针对 YT review 发现的 membership 与 lease 风险，修复 `renewClient` 在 active deletion journal 下的原子 quarantine/add membership，并在 VERIFIED 时将同 generation client 恢复为 ACTIVE。
+- `retryPurge` 不再信任调用方传入的 live client list，而是在 `meta+journal+system` 事务中重算未关闭且未过期的 client membership。
+- deletion enumerate/delete/PURGE_PENDING/finalizing 各阶段加入 recovery lease renewal；ACK pending 改为最多 5 秒轮询并重广播，超时返回明确 `ERR_PURGE_CLIENTS_PENDING`。
+- quarantine startup 检查 active journal，禁止旧数据 hydrate/render；purge receiver 做 journal/generation 校验、取消 pending preview、generation fence 后再 ACK。
+- 最新完整门禁：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送原子提交 `7dc81c5`；下一步仍需对 delayed/lost BroadcastChannel、lease-expiry 与不可逆删除确认流程补齐测试与修复。

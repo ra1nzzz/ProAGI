@@ -25,6 +25,7 @@ export function AppShell() {
   const [recovery, setRecovery] = useState<RecoveryKind | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const [detailOpen, setDetailOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const recoveryInvokerRef = useRef<HTMLElement>(null);
   const detailInvokerRef = useRef<HTMLElement>(null);
   const detailDrawerRef = useRef<HTMLElement>(null);
@@ -188,7 +189,7 @@ export function AppShell() {
     }
   };
 
-  const applyCorrection = async (action: Exclude<CorrectionAction, 'restore'>) => {
+  const performCorrection = async (action: Exclude<CorrectionAction, 'restore'>) => {
     if (!runtimeRef.current!.currentClaim()) {
       setDomainStatus('没有可纠正的 live Insight。');
       return;
@@ -208,6 +209,14 @@ export function AppShell() {
       setOrbState('ERROR');
       setDomainStatus(`纠正事务失败（${safeErrorCode(error)}）；未显示成功。`);
     }
+  };
+
+  const applyCorrection = async (action: Exclude<CorrectionAction, 'restore'>) => {
+    if (action === 'delete') {
+      setDeleteConfirmOpen(true);
+      return;
+    }
+    await performCorrection(action);
   };
 
   const runDomainReplay = () => {
@@ -398,6 +407,20 @@ export function AppShell() {
             </div>
           )}
         </section>
+
+        {deleteConfirmOpen ? (
+          <section className="stale-banner" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirm-title" aria-describedby="delete-confirm-copy">
+            <div>
+              <p className="eyebrow">不可逆操作</p>
+              <h2 id="delete-confirm-title">删除这条 Insight 及其完整 lineage？</h2>
+              <p id="delete-confirm-copy">这将移除相关修订、知识版本、纠正记录与报告引用；无关事件会保留。</p>
+            </div>
+            <div className="segmented-control">
+              <button type="button" autoFocus className="button button--quiet" onClick={() => setDeleteConfirmOpen(false)}>取消</button>
+              <button type="button" className="button button--primary" onClick={() => { setDeleteConfirmOpen(false); void performCorrection('delete'); }}>确认删除</button>
+            </div>
+          </section>
+        ) : null}
 
         {contentMode === 'stale' ? (
           <section className="stale-banner" role="status" aria-labelledby="stale-title">

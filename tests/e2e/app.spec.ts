@@ -107,6 +107,7 @@ test('accept and edit then delete closes the full claimKey lineage across reload
     .filter((value): value is string => typeof value === 'string');
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
+  await page.getByRole('button', { name: '确认删除' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
   await expect(page.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
   const after = await readStore(page, 'business') as Array<Record<string, unknown>>;
@@ -169,6 +170,7 @@ test('a second tab releases deleted lineage before purge audit completes', async
   await expect(secondTab.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
 
   await page.getByRole('button', { name: '删除 Insight' }).click();
+  await page.getByRole('button', { name: '确认删除' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
   await expect(secondTab.locator('.domain-loop__status')).toContainText('其他标签页已完成隐私清除');
   await expect(secondTab.getByRole('button', { name: '接受 Insight' })).toBeDisabled();

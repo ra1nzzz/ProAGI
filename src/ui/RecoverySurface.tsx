@@ -33,11 +33,11 @@ export function RecoverySurface({ kind, returnFocusRef, onRetry, onDismissDemo }
         </h2>
         <p>
           {blocked
-            ? '另一个 ProAGI 标签页仍占用本地存储。普通写入保持暂停；关闭其他标签页后重试。'
+            ? '另一个 ProAGI 标签页尚未完成释放。普通写入保持暂停；关闭或等待其他标签页后重试恢复。'
             : '普通写入已暂停。正在核对本地索引与投影；恢复不会自动重新开启观察。'}
         </p>
         <p className="recovery-surface__status" role="status" aria-live="polite" aria-atomic="true">
-          {blocked ? '当前状态：CLEAR ONLY · 尚未清除' : '当前状态：RECOVERY ONLY · 仍在恢复'}
+          {blocked ? '当前状态：PURGE PENDING · 等待释放' : '当前状态：RECOVERY ONLY · 仍在恢复'}
         </p>
         {blocked ? <p className="sr-only" role="alert">清除被阻止，数据尚未清除。</p> : null}
         <div className="button-row">

@@ -65,8 +65,13 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   async start(): Promise<BrowserRuntimeSnapshot> {
     if (!this.started) {
       this.starting ??= (async () => {
+        const startGeneration = this.operationGeneration;
         await this.adapter.open();
         const registration = await this.adapter.registerClient(this.clientId);
+        if (startGeneration !== this.operationGeneration) {
+          await this.adapter.closeClient(this.clientId).catch(() => undefined);
+          return;
+        }
         this.clientRenewal ??= setInterval(() => { void this.adapter.renewClient(this.clientId).catch(() => undefined); }, 2_000);
         if (registration.state === 'QUARANTINED') {
           const journals = await this.adapter.getAll<ActiveDeletionJournalRecord>('journal');
@@ -77,7 +82,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         } else {
           await this.hydrate();
         }
-        this.started = true;
+        if (startGeneration === this.operationGeneration) this.started = true;
       })().finally(() => { this.starting = null; });
       await this.starting;
     }

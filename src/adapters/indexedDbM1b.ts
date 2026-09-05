@@ -503,13 +503,19 @@ export class IndexedDbM1bAdapter {
 
   async renewClient(clientId: string, now = Date.now()): Promise<ClientRegistrationRecord> {
     const db = await this.database();
-    const tx = db.transaction('system', 'readwrite');
+    const tx = db.transaction(['system', 'journal'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const store = tx.objectStore('system');
       const current = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
       if (!current || current.recordType !== 'client_registration') throw new M1bError('ERR_CLIENT_NOT_REGISTERED');
-      const next = { ...current, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString() };
+      const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
+      const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
+      const quarantined = Boolean(active && !active.purge.sealedAt);
+      const next = { ...current, state: quarantined ? 'QUARANTINED' as const : current.state, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString(), ...(active ? { purgeGeneration: active.purge.generation } : {}) };
+      if (active && !active.purge.sealedAt && !active.purge.requiredClientIds.includes(clientId)) {
+        tx.objectStore('journal').put(updateJournalHash({ ...active, purge: { ...active.purge, requiredClientIds: [...active.purge.requiredClientIds, clientId].sort() }, updatedAt: new Date(now).toISOString() }));
+      }
       const record = { ...next, contentHash: hashCanonical(withoutHash(next)) };
       store.put(record);
       await done;
@@ -752,7 +758,7 @@ export class IndexedDbM1bAdapter {
         if (record.recordType === 'purge_ack' && record.deletionId === deletionId && record.generation === oldGeneration) system.delete(record.recordId);
       }
       const generation = crypto.randomUUID();
-      const requiredClientIds = [...new Set(liveClientIds)].sort();
+      const requiredClientIds = records.filter((record) => record.recordType === 'client_registration' && record.state !== 'CLOSING' && Date.parse(record.leaseExpiresAt) > now).map((record) => record.clientId).sort();
       for (const record of records) {
         if (record.recordType === 'client_registration' && requiredClientIds.includes(record.clientId)) {
           const nextBase = { ...record, state: 'QUARANTINED' as const, purgeGeneration: generation, writtenAt: new Date(now).toISOString() };
@@ -863,6 +869,12 @@ export class IndexedDbM1bAdapter {
       if (!journal || journal.state !== 'FINALIZING' || !journal.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');
       const verifiedId = crypto.randomUUID();
       const tombstoneId = crypto.randomUUID();
+      const clientRecords = await requestValue<Array<ClientRegistrationRecord | PurgeAckRecord>>(tx.objectStore('system').getAll());
+      for (const client of clientRecords) {
+        if (client.recordType !== 'client_registration' || client.purgeGeneration !== journal.purge.generation) continue;
+        const next = { ...client, state: 'ACTIVE' as const, purgeGeneration: undefined, writtenAt: new Date(now).toISOString() };
+        tx.objectStore('system').put({ ...next, contentHash: hashCanonical(withoutHash(next)) });
+      }
       journalStore.delete(deletionId);
       journalStore.add({ id: verifiedId, state: 'VERIFIED', deletedType: journal.targetType, workItemCount: journal.progress.totalCount, createdAt: new Date(now).toISOString(), verifiedAt: new Date(now).toISOString() });
       tx.objectStore('system').delete('recovery-lease');

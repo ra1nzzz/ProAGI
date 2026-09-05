@@ -255,26 +255,37 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const fenced = await this.adapter.fenceDeletion(plan, ownerClientId, startedAt);
     let journal = fenced.journal;
     while (journal.state === 'FENCED') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       journal = await this.adapter.enumerateDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
     }
     while (journal.state === 'DELETING') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       journal = await this.adapter.deleteChunk(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
     }
 
     if (this.imported) this.imported = withoutClaim(this.imported, claim, lineageAnchors);
     if (journal.state === 'PURGE_PENDING') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
       await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    const audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+    let audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+    const waitUntil = Date.now() + 5_000;
+    while (audit.outcome === 'CLIENTS_PENDING' && Date.now() < waitUntil) {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
+      this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+    }
     if (audit.outcome !== 'CLEAN') {
       const roots = audit.receipts.filter((receipt) => receipt.forbiddenReferenceCount > 0)
         .map((receipt) => receipt.rootId.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()).join('_');
-      throw new Error(`ERR_DELETE_REACHABLE_${roots || 'UNKNOWN'}`);
+      throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : `ERR_DELETE_REACHABLE_${roots || 'UNKNOWN'}`);
     }
     let finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
     while (!finalizing.finalizing.complete) {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
     }
     await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());

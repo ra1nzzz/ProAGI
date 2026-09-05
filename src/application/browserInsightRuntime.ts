@@ -28,6 +28,8 @@ export interface BrowserRuntimeSnapshot {
 
 export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, ControlPort {
   private adapter = new IndexedDbM1bAdapter(DATABASE_NAME);
+  private readonly clientId = crypto.randomUUID();
+  private readonly purgeChannel: BroadcastChannel | null = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1');
   private service = new InsightLoopService();
   private imported: ImportCommit | null = null;
   private started = false;
@@ -36,10 +38,23 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private previewing: Promise<ImportCommit> | null = null;
   private unregisterRuntimeRoot = this.registerRuntimeRoot();
 
+  constructor() {
+    this.purgeChannel?.addEventListener('message', (event) => {
+      const data = event.data as { type?: string; deletionId?: string; generation?: string; clientId?: string };
+      if (data.type !== 'PURGE_REQUEST' || data.clientId === this.clientId || !data.deletionId || !data.generation) return;
+      this.pendingPreview = null;
+      this.imported = null;
+      this.service = new InsightLoopService();
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('proagi:external-purge'));
+      void this.adapter.acknowledgePurge(data.deletionId, data.generation, this.clientId).catch(() => undefined);
+    });
+  }
+
   async start(): Promise<BrowserRuntimeSnapshot> {
     if (!this.started) {
       this.starting ??= (async () => {
         await this.adapter.open();
+        await this.adapter.registerClient(this.clientId);
         await this.hydrate();
         this.started = true;
       })().finally(() => { this.starting = null; });
@@ -226,8 +241,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
 
     if (this.imported) this.imported = withoutClaim(this.imported, claim, lineageAnchors);
-    if (journal.state === 'PURGE_PENDING') { /* no registered peer clients in M1 */
-      void journal;
+    if (journal.state === 'PURGE_PENDING') {
+      this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
     const audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
     if (audit.outcome !== 'CLEAN') {
@@ -279,6 +296,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   close(): void {
+    this.purgeChannel?.close();
+    void this.adapter.closeClient(this.clientId).catch(() => undefined);
     const adapter = this.adapter;
     const pending = this.pendingPreview;
     this.pendingPreview = null;

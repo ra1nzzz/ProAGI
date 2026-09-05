@@ -456,7 +456,7 @@ export class IndexedDbM1bAdapter {
     const done = transactionDone(tx);
     try {
       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
-      const active = journals.find((journal) => journal.state !== 'FAILED');
+      const active = journals.find((journal) => journal.recordType === 'active_deletion_journal' && journal.state !== 'FAILED');
       const state: ClientRegistrationRecord['state'] = active ? 'QUARANTINED' : 'ACTIVE';
       const base = {
         recordId: `client:${clientId}`,
@@ -475,6 +475,25 @@ export class IndexedDbM1bAdapter {
       }
       await done;
       return record;
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
+  async closeClient(clientId: string, now = Date.now()): Promise<void> {
+    const db = await this.database();
+    const tx = db.transaction('system', 'readwrite');
+    const done = transactionDone(tx);
+    try {
+      const store = tx.objectStore('system');
+      const record = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
+      if (record?.recordType === 'client_registration') {
+        const next = { ...record, state: 'CLOSING' as const, leaseExpiresAt: new Date(now).toISOString(), writtenAt: new Date(now).toISOString() };
+        store.put({ ...next, contentHash: hashCanonical(withoutHash(next)) });
+      }
+      await done;
     } catch (error) {
       safeAbort(tx);
       await done.catch(() => undefined);

@@ -40,6 +40,17 @@ export function AppShell() {
   const privateMode = canonicalPrivate;
 
   useEffect(() => {
+    const handleExternalPurge = () => {
+      setImported(null);
+      setPreviewToken(null);
+      setDomainStatus('其他标签页已完成隐私清除；当前视图已释放旧数据。');
+      setOrbState('IDLE');
+    };
+    window.addEventListener('proagi:external-purge', handleExternalPurge);
+    return () => window.removeEventListener('proagi:external-purge', handleExternalPurge);
+  }, []);
+
+  useEffect(() => {
     let active = true;
     void runtimeRef.current!.start().then((snapshot) => {
       if (!active) return;

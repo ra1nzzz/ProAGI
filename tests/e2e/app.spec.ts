@@ -157,3 +157,20 @@ test('a second tab privacy epoch fences an older preview commit', async ({ page,
   expect(await readStore(page, 'business')).toEqual([]);
   await secondTab.close();
 });
+
+test('a second tab releases deleted lineage before purge audit completes', async ({ page, context }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '预览本地样例' }).click();
+  await page.getByRole('button', { name: '确认导入' }).click();
+  await expect(page.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
+
+  const secondTab = await context.newPage();
+  await secondTab.goto('/');
+  await expect(secondTab.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
+
+  await page.getByRole('button', { name: '删除 Insight' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
+  await expect(secondTab.locator('.domain-loop__status')).toContainText('其他标签页已完成隐私清除');
+  await expect(secondTab.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
+  await secondTab.close();
+});

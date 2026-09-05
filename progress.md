@@ -231,3 +231,10 @@
 - 识别 Vitest/Playwright 共享 IndexedDB 并行隔离缺陷：Vitest 设置 `fileParallelism: false`，Playwright 设置 `workers: 1`，默认门禁稳定化。
 - 完整门禁通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送 `d222565` 与 `112a52f`。
+
+## Goal Round 15
+
+- 按 YT review 加固 purge receiver 的 sealed-generation 清理与 CLOSING lease 终态，并将动态 root registry 变化阻断在 audit 前。
+- 修复测试竞态：Playwright E2E 等待第二标签 hydrate 完成后再进行 purge，并以单 worker 串行运行共享存储场景；重复运行 cross-tab 用例 6/6 通过。
+- 完整门禁再次通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送 `8c0f12c`、`d222565`、`112a52f`、`33198bb`、`96cee40`。

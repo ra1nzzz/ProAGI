@@ -273,6 +273,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
       this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
       await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
+      if (!this.purgeChannel && journal.purge.requiredClientIds.some((clientId) => clientId !== this.clientId)) {
+        throw new Error('ERR_PURGE_CLIENTS_PENDING');
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     let audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());

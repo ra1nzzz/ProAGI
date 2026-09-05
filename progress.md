@@ -192,3 +192,10 @@
 - 删除操作增加 accessible alertdialog：明确不可逆影响，提供 Cancel/Confirm，且 Playwright deletion tests 已适配确认流程。
 - 本地完整门禁再次通过：Vitest 58/58、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送 `7dc81c5` 与 `d1ff277`；最新确认流程提交为 `d1ff277`。仍待 delayed/lost BroadcastChannel 与 recovery surface 的专门故障注入测试。
+
+## Goal Round 8
+
+- 删除失败且返回 `ERR_PURGE_CLIENTS_PENDING` 时，AppShell 进入 `blocked` recovery 状态，避免普通错误文案掩盖可恢复的跨标签等待。
+- 新增 privacy regression：过期 client 在 active purge 中续租时必须原子转入 QUARANTINED 并保留在 required membership。
+- 完整门禁：11 suites、Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build 全部通过。
+- 已推送 `7d6f5e7`；Evidence Pack 将在本轮提交后重新生成。

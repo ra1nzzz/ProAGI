@@ -126,6 +126,7 @@ test('accept and edit then delete closes the full claimKey lineage across reload
   await page.reload();
   await expect(page.locator('.domain-loop__status')).toContainText('已从本地 canonical store 恢复');
   await expect(page.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
+  await expect(page.locator('.claim-card')).toHaveCount(1);
   await expect(page.locator('.claim-card__statement')).not.toContainText('在 demo-project 修改代码后运行测试');
   const reopened = await readStore(page, 'business') as Array<Record<string, unknown>>;
   expect(reopened.some((record) => ['work_model_claim_v1', 'knowledge_version_v1', 'correction_record_v1', 'daily_report_snapshot_v1'].includes(String(record.recordType)))).toBe(false);

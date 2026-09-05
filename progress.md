@@ -238,3 +238,10 @@
 - 修复测试竞态：Playwright E2E 等待第二标签 hydrate 完成后再进行 purge，并以单 worker 串行运行共享存储场景；重复运行 cross-tab 用例 6/6 通过。
 - 完整门禁再次通过：Vitest 59/59、Playwright 18/18、typecheck/lint/CSP/audit/build。
 - 已推送 `8c0f12c`、`d222565`、`112a52f`、`33198bb`、`96cee40`。
+
+## Goal Round 16
+
+- 新增 dynamic root registry regression：audit 期间 registry key 集合变化必须返回 `REGISTRY_INCOMPLETE`，不得 CLEAN。
+- 修复 cross-tab E2E 间歇性 `ERR_CURSOR_CONFLICT`：第二次删除前 bounded retry，并确保 owner application knowledge root 在 audit 前释放。
+- 完整门禁再次通过：Vitest 60/60、Playwright 18/18、typecheck/lint/CSP/audit/build。
+- 已推送 `d850a16`、`2cb460d`、`7474267`。

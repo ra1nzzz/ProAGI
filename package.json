@@ -25,16 +25,19 @@
     "test:a11y": "vitest run tests/a11y",
     "test:visual": "vitest run tests/visual",
     "test:e2e": "playwright test",
+    "test:release-gates": "node --test scripts/tests/*.test.mjs",
+    "test:report": "node scripts/run-test-report.mjs vitest --lane pr-vitest",
+    "test:e2e:report": "node scripts/run-test-report.mjs playwright --lane pr-e2e",
     "playwright:install": "playwright install chromium",
     "lint": "eslint . --max-warnings 0",
     "check:suites": "node scripts/check-suites.mjs",
     "evidence:init": "node scripts/create-evidence.mjs",
     "verify:csp": "node scripts/check-csp.mjs",
-    "smoke": "npm run build && playwright test tests/e2e/app.spec.ts --grep \"renders the canonical\"",
+    "smoke": "node scripts/run-test-report.mjs playwright --lane pr-smoke -- tests/e2e/app.spec.ts --grep \"renders the canonical\"",
     "verify": "npm run verify:pr",
-    "verify:pr": "npm run check:suites && npm run typecheck && npm run lint && npm run verify:csp && npm audit --audit-level=high && npm run test && npm run build && npm run test:e2e && npm run smoke",
-    "verify:nightly": "npm run verify:pr && npm run test:privacy && npm run test:worker-contract",
-    "verify:release": "npm run verify:nightly && npm run smoke"
+    "verify:pr": "npm run check:suites && npm run test:release-gates && npm run typecheck && npm run lint && npm run verify:csp && npm audit --audit-level=high && npm run test:report && npm run build && npm run test:e2e:report && npm run smoke",
+    "verify:nightly": "npm run verify:pr && node scripts/run-test-report.mjs vitest --lane nightly-privacy -- tests/privacy && node scripts/run-test-report.mjs vitest --lane nightly-worker -- tests/worker",
+    "verify:release": "npm run verify:nightly && node scripts/check-release-candidate.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "5.2.8",

@@ -25,5 +25,5 @@ export interface ControlPort {
   resumePrivacy(): Promise<{ readonly privacyEpoch: number }>;
   clear(): Promise<void>;
   recover(): Promise<void>;
-  evaluateReplay(): ReplaySnapshotV1;
+  evaluateReplay(): Promise<ReplaySnapshotV1>;
 }

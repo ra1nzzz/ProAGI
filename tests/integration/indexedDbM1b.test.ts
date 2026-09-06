@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CommitResponseLostError, M1bError } from '../../src/adapters/m1bTypes';
 import { IndexedDbM1bAdapter, makeBatch, toStoredRecord } from '../../src/adapters/indexedDbM1b';
+import { hashCanonical, sha256 } from '../../src/domain/canonical';
 
 const adapters: IndexedDbM1bAdapter[] = [];
 
@@ -72,7 +73,7 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
       token: 'preview-token-with-more-than-128-bits-of-test-entropy',
       callerId: 'web-client',
       idempotencyKey: 'preview-idem',
-      inputHash: 'sha256:input',
+      inputHash: sha256('{"fixture":true}'),
       bytes: new TextEncoder().encode('{"fixture":true}'),
       privacyEpoch: 0,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -82,10 +83,11 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
       idempotencyKey: 'preview-idem',
       expectedCursor: '0',
       expectedPrivacyEpoch: 0,
-      requiresActiveObservation: true,
+      requiresActiveObservation: true, requiresPreview: true,
       storeNames: ['business'],
       mutations: [{ kind: 'insertImmutable', storeName: 'business', record }],
     });
+    await adapter.bindPreviewBatch(staged.token, batch.batchHash);
     const result = await adapter.commitPreview(staged.token, 'web-client', batch);
     expect(result.applied).toBe(true);
     expect(await adapter.getRecord<{ state: string }>('system', staged.guard.recordId)).toMatchObject({ state: 'CONSUMED' });
@@ -102,16 +104,17 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
       token: 'buffer-loss-token',
       callerId: 'web-client',
       idempotencyKey: 'buffer-loss-idem',
-      inputHash: 'sha256:input',
+      inputHash: sha256(new TextDecoder().decode(new Uint8Array([1, 2, 3]))),
       bytes: new Uint8Array([1, 2, 3]),
       privacyEpoch: 0,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     adapter.releasePreviewBuffer(staged.token);
     const batch = makeBatch({
-      idempotencyKey: 'buffer-loss-idem', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true,
+      idempotencyKey: 'buffer-loss-idem', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true, requiresPreview: true,
       storeNames: ['business'], mutations: [{ kind: 'insertImmutable', storeName: 'business', record: toStoredRecord('never', 'behavior_event', {}) }],
     });
+    await adapter.bindPreviewBatch(staged.token, batch.batchHash);
     await expect(adapter.commitPreview(staged.token, 'web-client', batch)).rejects.toMatchObject({ code: 'ERR_PREVIEW_BUFFER_MISSING' });
     expect(await adapter.getRecord<{ state: string }>('system', staged.guard.recordId)).toMatchObject({ state: 'READY' });
     expect(await adapter.getAll('business')).toHaveLength(0);
@@ -121,7 +124,7 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
     const adapter = createAdapter();
     const session = await adapter.createImportSession('stream-1', 'session-1');
     const event = toStoredRecord('event-staged', 'behavior_event', { sourceItemKey: 'staged' });
-    await adapter.stageImportBatch('session-1', [event], 'sha256:batch');
+    await adapter.stageImportBatch('session-1', [event], hashCanonical([event]));
     expect(await adapter.scanPublishedBusiness()).toEqual([]);
     expect((await adapter.getAll<{ recordType: string }>('system')).some((value) => value.recordType === 'import_staging')).toBe(true);
 
@@ -136,7 +139,7 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
     const adapter = createAdapter();
     const staged = await adapter.stagePreview({
       token: 'privacy-preview-token-with-more-than-128-bits', callerId: 'web-client', idempotencyKey: 'privacy-preview',
-      inputHash: 'sha256:input', bytes: new TextEncoder().encode('private'), privacyEpoch: 0,
+      inputHash: sha256('private'), bytes: new TextEncoder().encode('private'), privacyEpoch: 0,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     await adapter.setPrivacyMode('0', 0, 'PRIVATE', 'privacy-on');
@@ -144,7 +147,7 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
     expect(await adapter.getRecord('system', staged.guard.recordId)).toBeUndefined();
 
     const staleBatch = makeBatch({
-      idempotencyKey: 'privacy-preview', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true,
+      idempotencyKey: 'privacy-preview', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true, requiresPreview: true,
       storeNames: ['business'], mutations: [{ kind: 'insertImmutable', storeName: 'business', record: toStoredRecord('stale-event', 'behavior_event', {}) }],
     });
     await expect(adapter.commitPreview(staged.token, 'web-client', staleBatch)).rejects.toMatchObject({ code: 'ERR_PRIVACY_EPOCH_STALE' });

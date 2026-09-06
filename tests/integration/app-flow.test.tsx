@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import App from '../../src/App';
 import { BrowserInsightRuntime } from '../../src/application/browserInsightRuntime';
@@ -34,7 +34,7 @@ describe('runnable Insight Loop UI', () => {
     expect(await screen.findByText(/accept 已持久写入不可变 revision/)).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '运行 Replay' }));
-    expect(screen.getByText(/Replay 完成：/)).toBeVisible();
+    await waitFor(() => expect(screen.getByText(/Replay 完成：/)).toBeVisible());
   });
 
   it('reconciles a lost commit response from the durable idempotency ledger', async () => {
@@ -43,6 +43,10 @@ describe('runnable Insight Loop UI', () => {
     await expect(runtime.commitBundled({ simulateResponseLoss: true })).resolves.toMatchObject({ acceptedCount: 4 });
     await expect(runtime.snapshot()).resolves.toMatchObject({ cursor: '1', imported: expect.any(Object) });
     runtime.close();
+
+    const recovered = new BrowserInsightRuntime();
+    await expect(recovered.start()).resolves.toMatchObject({ cursor: '1', imported: expect.any(Object) });
+    recovered.close();
   });
 
   it('invalidates an outstanding preview when PRIVATE advances the epoch', async () => {

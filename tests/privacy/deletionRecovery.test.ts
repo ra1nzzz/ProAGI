@@ -1,10 +1,12 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { hashCanonical, sha256 } from '../../src/domain/canonical';
 import { IndexedDbM1bAdapter, makeBatch, toStoredRecord } from '../../src/adapters/indexedDbM1b';
-import type { ActiveDeletionJournalRecord, RecoveryLeaseRecord } from '../../src/adapters/m1bTypes';
+import type { ActiveDeletionJournalRecord, RecoveryLeaseRecord, StoredRecord } from '../../src/adapters/m1bTypes';
 
 const adapters: IndexedDbM1bAdapter[] = [];
 const now = Date.parse('2025-01-01T00:00:00.000Z');
+const noopRootHooks = { freeze: () => undefined, unfreeze: () => undefined };
 
 function createAdapter(): IndexedDbM1bAdapter {
   const adapter = new IndexedDbM1bAdapter(undefined, () => now);
@@ -29,10 +31,39 @@ async function seedTarget(adapter: IndexedDbM1bAdapter) {
   return target;
 }
 
-async function enumerateAll(adapter: IndexedDbM1bAdapter, journal: ActiveDeletionJournalRecord, lease: RecoveryLeaseRecord) {
+async function enumerateAll(adapter: IndexedDbM1bAdapter, journal: ActiveDeletionJournalRecord, lease: RecoveryLeaseRecord, at = now + 1) {
   let current = journal;
-  while (current.state === 'FENCED') current = await adapter.enumerateDeletionPage(current.id, lease.ownerClientId, lease.fencingToken, 2, now + 1);
+  while (current.state === 'FENCED') current = await adapter.enumerateDeletionPage(current.id, lease.ownerClientId, lease.fencingToken, 2, at);
   return current;
+}
+
+async function purgeFully(adapter: IndexedDbM1bAdapter, target: StoredRecord, owner: string, at: number): Promise<void> {
+  const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+  const fenced = await adapter.fenceDeletion(plan, owner, at);
+  let current = await enumerateAll(adapter, fenced.journal, fenced.lease, at + 1);
+  while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, owner, fenced.lease.fencingToken, 500, at + 2);
+  await adapter.sealAndAudit(current.id, owner, fenced.lease.fencingToken, at + 3);
+  current = await adapter.finalizeDeletionPage(current.id, owner, fenced.lease.fencingToken, 500, at + 4);
+  await adapter.verifyDeletion(current.id, owner, fenced.lease.fencingToken, at + 5);
+}
+
+async function mutateStoredRecord(adapter: IndexedDbM1bAdapter, storeName: string, key: string, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(adapter.databaseName);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(storeName, 'readwrite');
+    const store = transaction.objectStore(storeName);
+    const request = store.get(key);
+    request.onsuccess = () => store.put(mutate(request.result as Record<string, unknown>));
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('transaction aborted'));
+  });
+  database.close();
 }
 
 describe('M1b deletion and recovery control plane', () => {
@@ -66,10 +97,14 @@ describe('M1b deletion and recovery control plane', () => {
     expect(current.state).toBe('PURGE_PENDING');
 
     const audit = await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 3);
-    expect(audit).toMatchObject({ outcome: 'CLEAN', reachableCount: 0, registryComplete: true, coverage: 'single-browser-in-process' });
+    expect(audit).toMatchObject({ outcome: 'CLEAN', reachableCount: 0, registryComplete: true, coverage: 'single-browser-in-process', registryRevision: 1, journalHash: expect.any(String), leaseGeneration: fenced.lease.generation, leaseFencingTokenHash: expect.any(String) });
     const finalizing = await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 1, now + 4);
     expect(finalizing).toMatchObject({ state: 'FINALIZING', finalizing: { complete: true } });
-    const verified = await adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 5);
+    await expect(adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 5, true)).rejects.toMatchObject({ code: 'ERR_TEST_RESPONSE_LOST' });
+    const verified = await adapter.verifyDeletion(current.id, 'owner', 'stale-after-commit', now + 6);
+    await expect(adapter.verifyDeletion(current.id, 'owner', 'different-retry-token', now + 7)).resolves.toEqual(verified);
+    const verificationReceipt = (await adapter.getAll('system')).find((record) => (record as { recordType?: string }).recordType === 'deletion_verification_receipt') as { registryRevision: number; auditHash: string; journalHash: string; leaseGeneration: number; leaseFencingTokenHash: string };
+    expect(verificationReceipt).toMatchObject({ registryRevision: 1, auditHash: expect.any(String), journalHash: finalizing.contentHash, leaseGeneration: fenced.lease.generation, leaseFencingTokenHash: expect.any(String) });
     expect(verified.verifiedId).not.toContain(target.recordId);
     expect(verified.tombstoneId).not.toContain(target.recordId);
     expect(await adapter.getMeta()).toMatchObject({ recoveryMode: 'NORMAL', recoveryBytes: 0 });
@@ -79,6 +114,208 @@ describe('M1b deletion and recovery control plane', () => {
       expect(serialized).not.toContain(target.recordId);
       expect(serialized).not.toContain(target.contentHash);
     }
+  });
+
+  it('keeps a permanent deny digest after more than 32 purge watermarks and restart', async () => {
+    const databaseName = 'permanent-purge-index-test';
+    const adapter = new IndexedDbM1bAdapter(databaseName, () => now);
+    adapters.push(adapter);
+    let firstTarget: StoredRecord | undefined;
+    for (let index = 0; index < 33; index += 1) {
+      const meta = await adapter.getMeta();
+      const target = toStoredRecord(`claim-target-${index}`, 'work_model_claim', { statement: `synthetic-${index}` }, new Date(now + index).toISOString());
+      if (!firstTarget) firstTarget = target;
+      await adapter.commit(makeBatch({
+        idempotencyKey: `seed-target-${index}`, expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch, storeNames: ['business'],
+        mutations: [{ kind: 'insertImmutable', storeName: 'business', record: target }],
+      }));
+      await purgeFully(adapter, target, `owner-${index}`, now + index * 10);
+    }
+    adapter.close();
+    const restarted = new IndexedDbM1bAdapter(databaseName, () => now + 400);
+    adapters.push(restarted);
+    const meta = await restarted.getMeta();
+    const resurrection = toStoredRecord(firstTarget!.recordId, firstTarget!.recordType, { statement: 'resurrection-after-history-eviction' }, new Date(now + 500).toISOString());
+    await expect(restarted.commit(makeBatch({
+      idempotencyKey: 'post-33-resurrection', expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch, storeNames: ['business'],
+      mutations: [{ kind: 'insertImmutable', storeName: 'business', record: resurrection }],
+    }))).rejects.toMatchObject({ code: 'ERR_PURGED_REFERENCE' });
+  }, 20_000);
+
+  it('rejects a post-verify resurrection that reuses a purged anchor', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    current = await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 3);
+    await adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 4);
+    const meta = await adapter.getMeta();
+    const resurrection = toStoredRecord(target.recordId, target.recordType, { statement: 'resurrection' }, new Date(now + 5).toISOString());
+    await expect(adapter.commit(makeBatch({
+      idempotencyKey: 'post-purge-resurrection', expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch, storeNames: ['business'],
+      mutations: [{ kind: 'insertImmutable', storeName: 'business', record: resurrection }],
+    }))).rejects.toMatchObject({ code: 'ERR_PURGED_REFERENCE' });
+    expect(await adapter.getRecord('business', target.recordId)).toBeUndefined();
+    const watermark = (meta.purgeWatermarks ?? [])[0] as unknown as Record<string, unknown> | undefined;
+    expect(watermark?.targetAnchors).toBeUndefined();
+    expect(JSON.stringify(meta)).not.toContain(target.recordId);
+    expect(JSON.stringify(meta)).not.toContain(target.contentHash);
+  });
+
+  it('rejects a forged terminal receipt and its companion state', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    current = await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 3);
+    const verified = await adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 4);
+    await mutateStoredRecord(adapter, 'system', `verification:${sha256(current.id)}`, (value) => ({ ...value, auditHash: 'sha256:forged' }));
+    await expect(adapter.verifyDeletion(current.id, 'owner', 'stale', now + 5)).rejects.toMatchObject({ code: 'ERR_VERIFY_RECEIPT_INVALID' });
+    expect(verified.verifiedId).toBeDefined();
+  });
+
+  it('keeps a registered client ACK through finalization and removes it in the final Tv', async () => {
+    const adapter = createAdapter();
+    await adapter.registerClient('registered-client', now);
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.acknowledgePurge(current.id, current.purge.generation, 'registered-client', now + 2);
+    const audit = await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 3);
+    expect(audit).toMatchObject({ outcome: 'CLEAN', allRequiredClientsPurged: true });
+    const finalizing = await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 4);
+    expect(finalizing.finalizing.complete).toBe(true);
+    expect((await adapter.getAll('system')).some((record) => (record as { recordType?: string }).recordType === 'purge_ack')).toBe(true);
+    await adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 5);
+    expect((await adapter.getAll('system')).some((record) => (record as { recordType?: string }).recordType === 'purge_ack')).toBe(false);
+  });
+
+  it('shares the root coordinator across adapters for one database', async () => {
+    const first = new IndexedDbM1bAdapter('shared-root-coordinator-test', () => now);
+    const second = new IndexedDbM1bAdapter('shared-root-coordinator-test', () => now);
+    adapters.push(first, second);
+    const target = await seedTarget(first);
+    const heapRoot: unknown[] = [{ selectedId: target.recordId }];
+    const dispose = second.registerInProcessRoot('second-adapter.heap', () => heapRoot, noopRootHooks);
+    const plan = await first.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await first.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(first, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await first.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    const result = await first.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    expect(result.outcome).toBe('REACHABLE');
+    expect(result.receipts.find((receipt) => receipt.rootId === 'second-adapter.heap')).toMatchObject({ forbiddenReferenceCount: 1 });
+    dispose();
+    const third = new IndexedDbM1bAdapter('shared-root-coordinator-test', () => now);
+    adapters.push(third);
+    const readded = first.registerInProcessRoot('readded-after-gap', () => heapRoot, noopRootHooks);
+    const lateAudit = await third.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 3);
+    expect(lateAudit.receipts.find((receipt) => receipt.rootId === 'readded-after-gap')).toMatchObject({ forbiddenReferenceCount: 1 });
+    readded();
+  });
+
+  it('holds a root quiescence barrier across final verification', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    let armed = false;
+    let blocked = false;
+    let attempted = false;
+    let freezeMutationError: string | undefined;
+    const freezeProbeDispose = adapter.registerInProcessRoot('freeze-probe', () => [], {
+      freeze: () => { try { adapter.beginInProcessRootMutation(); } catch (error) { freezeMutationError = (error as { code?: string }).code; } },
+      unfreeze: () => undefined,
+    });
+    const dispose = adapter.registerInProcessRoot('quiescence-root', () => {
+      if (armed && !attempted) {
+        attempted = true;
+        try {
+          adapter.registerInProcessRoot('late-root', () => [{ selectedId: target.recordId }], noopRootHooks);
+        } catch (error) {
+          blocked = (error as { code?: string }).code === 'ERR_PURGE_QUIESCED';
+        }
+      }
+      return [];
+    }, noopRootHooks);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    const finalizing = await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 3);
+    armed = true;
+    const releaseMutation = adapter.beginInProcessRootMutation();
+    const waitingVerification = adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 4);
+    await Promise.resolve();
+    releaseMutation();
+    await expect(waitingVerification).resolves.toHaveProperty('verifiedId');
+    expect(blocked).toBe(true);
+    expect(freezeMutationError).toBe('ERR_PURGE_QUIESCED');
+    dispose();
+    freezeProbeDispose();
+    expect(finalizing.finalizing.complete).toBe(true);
+  });
+
+  it('keeps a writer queued behind the atomic final verification transaction', async () => {
+    const first = new IndexedDbM1bAdapter('atomic-verify-writer-test', () => now);
+    const second = new IndexedDbM1bAdapter('atomic-verify-writer-test', () => now);
+    adapters.push(first, second);
+    const target = await seedTarget(first);
+    const plan = await first.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await first.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(first, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await first.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await first.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    await first.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 3);
+    const finalMeta = await first.getMeta();
+    const writerBatch = makeBatch({
+      idempotencyKey: 'queued-during-verify', expectedCursor: finalMeta.cursor, expectedPrivacyEpoch: finalMeta.privacyEpoch, storeNames: ['business'],
+      mutations: [{ kind: 'insertImmutable' as const, storeName: 'business' as const, record: toStoredRecord('queued-writer-record', 'queued-writer', {}) }],
+    });
+    let armed = false;
+    let writerPromise: Promise<unknown> | null = null;
+    let writerError: unknown;
+    const dispose = second.registerInProcessRoot('queued-writer-root', () => {
+      if (armed && !writerPromise) writerPromise = second.commit(writerBatch).catch((error) => { writerError = error; });
+      return [];
+    }, noopRootHooks);
+    armed = true;
+    await expect(first.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 4)).resolves.toHaveProperty('verifiedId');
+    expect(writerPromise).not.toBeNull();
+    await writerPromise;
+    expect(writerError).toMatchObject({ code: 'ERR_PURGE_QUIESCED' });
+    expect(await second.getRecord('business', 'queued-writer-record')).toBeUndefined();
+    dispose();
+  });
+
+  it('fails closed when final verification sees a noncanonical journal or lease', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner', fenced.lease.fencingToken, 500, now + 1);
+    await adapter.sealAndAudit(current.id, 'owner', fenced.lease.fencingToken, now + 2);
+    await adapter.finalizeDeletionPage(current.id, 'owner', fenced.lease.fencingToken, 500, now + 3);
+
+    await mutateStoredRecord(adapter, 'journal', current.id, (value) => ({ ...value, contentHash: 'sha256:tampered' }));
+    await expect(adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 4)).rejects.toMatchObject({ code: 'ERR_JOURNAL_HASH_INVALID' });
+    expect((await adapter.getRecord<ActiveDeletionJournalRecord>('journal', current.id))?.state).toBe('FINALIZING');
+
+    await mutateStoredRecord(adapter, 'journal', current.id, (value) => {
+      const base = { ...value };
+      delete base.contentHash;
+      return { ...base, contentHash: hashCanonical(base) };
+    });
+    await mutateStoredRecord(adapter, 'system', 'recovery-lease', (value) => ({ ...value, contentHash: 'sha256:tampered' }));
+    await expect(adapter.verifyDeletion(current.id, 'owner', fenced.lease.fencingToken, now + 5)).rejects.toMatchObject({ code: 'ERR_RECOVERY_LEASE_HASH_INVALID' });
+    expect((await adapter.getRecord<ActiveDeletionJournalRecord>('journal', current.id))?.state).toBe('FINALIZING');
   });
 
   it('fences stale recovery owners after expiry and lease steal', async () => {
@@ -148,7 +385,7 @@ describe('M1b deletion and recovery control plane', () => {
     const adapter = createAdapter();
     const target = await seedTarget(adapter);
     const heapRoot: unknown[] = [{ selectedId: target.recordId }];
-    const unregister = adapter.registerInProcessRoot('client.heap', () => heapRoot);
+    const unregister = adapter.registerInProcessRoot('client.heap', () => heapRoot, noopRootHooks);
     const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
     const fenced = await adapter.fenceDeletion(plan, 'owner', now);
     let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
@@ -172,10 +409,10 @@ describe('M1b deletion and recovery control plane', () => {
       if (!replaced) {
         replaced = true;
         dispose?.();
-        adapter.registerInProcessRoot('aba-root', () => [{ selectedId: target.recordId }]);
+        adapter.registerInProcessRoot('aba-root', () => [{ selectedId: target.recordId }], noopRootHooks);
       }
       return [];
-    });
+    }, noopRootHooks);
     const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
     const fenced = await adapter.fenceDeletion(plan, 'owner', now);
     let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
@@ -191,10 +428,10 @@ describe('M1b deletion and recovery control plane', () => {
     adapter.registerInProcessRoot('dynamic-root-trigger', () => {
       if (!registered) {
         registered = true;
-        adapter.registerInProcessRoot('late-root', () => [{ selectedId: target.recordId }]);
+        adapter.registerInProcessRoot('late-root', () => [{ selectedId: target.recordId }], noopRootHooks);
       }
       return [];
-    });
+    }, noopRootHooks);
     const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
     const fenced = await adapter.fenceDeletion(plan, 'owner', now);
     let current = await enumerateAll(adapter, fenced.journal, fenced.lease);

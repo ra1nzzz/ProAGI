@@ -2,10 +2,18 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BrowserInsightRuntime } from '../application/browserInsightRuntime';
 import type { ImportCommit } from '../application/insightService';
 import type { CorrectionAction } from '../domain/types';
+import type { ReplaySnapshotV1 } from '../domain/replay';
 import { ORB_STATES, ORB_STATE_LABELS, type ContentMode, type OrbState } from './demoViewModel';
 import { buildInsightPresentation } from './presentation';
 import { Orb, type OrbProfile } from './Orb';
 import { RecoverySurface, type RecoveryKind } from './RecoverySurface';
+
+interface ProagiE2eHarness {
+  hit?: (name: 'commit:after-persisted' | 'purge:before-release') => Promise<void>;
+  runtime?: {
+    importWithResponseLoss: () => Promise<void>;
+  };
+}
 
 const stateShortLabels: Readonly<Record<OrbState, string>> = {
   LEARNING: '学习',
@@ -34,31 +42,91 @@ export function AppShell() {
   const detailCloseRef = useRef<HTMLButtonElement>(null);
   const runtimeRef = useRef<BrowserInsightRuntime | null>(null);
   const [imported, setImported] = useState<ImportCommit | null>(null);
+  const [replaySnapshot, setReplaySnapshot] = useState<ReplaySnapshotV1 | null>(null);
+  const uiEpochRef = useRef(0);
   const [previewToken, setPreviewToken] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [domainStatus, setDomainStatus] = useState('正在读取本地 canonical store…');
   const [domainRevision, setDomainRevision] = useState(0);
+  const purgeCommitCallbacksRef = useRef<Array<() => void>>([]);
+  const [purgeCommitVersion, setPurgeCommitVersion] = useState(0);
 
-  if (!runtimeRef.current) runtimeRef.current = new BrowserInsightRuntime();
+  if (!runtimeRef.current) {
+    const harness = (import.meta as ImportMeta & { env?: { VITE_PROAGI_E2E_HOOKS?: string } }).env?.VITE_PROAGI_E2E_HOOKS === '1'
+      ? (window as Window & { __proagiE2e?: ProagiE2eHarness }).__proagiE2e
+      : undefined;
+    const runtime = new BrowserInsightRuntime({
+      afterCommitPersisted: () => harness?.hit?.('commit:after-persisted'),
+      beforePurgeRelease: () => harness?.hit?.('purge:before-release'),
+    });
+    if (harness) {
+      harness.runtime = {
+        importWithResponseLoss: async () => {
+          await runtime.preview();
+          await runtime.commitBundled({ simulateResponseLoss: true });
+        },
+      };
+    }
+    runtimeRef.current = runtime;
+  }
   const privateMode = canonicalPrivate;
 
   useLayoutEffect(() => {
+    let mounted = true;
+    const bridgeWindow = window as Window & { __proagiPurgeUiBridge?: boolean; __proagiPurgeUiBridgeCount?: number };
+    const pendingCallbacks = purgeCommitCallbacksRef;
     const handleExternalPurge = (event: Event) => {
+      const detail = (event as CustomEvent<{ onCommitted?: () => void }>).detail;
+      uiEpochRef.current += 1;
       setImported(null);
+      setReplaySnapshot(null);
       setPreviewToken(null);
-      setDomainStatus('其他标签页已完成隐私清除；当前视图已释放旧数据。');
+      setDomainStatus('其他标签页正在执行隐私清除；当前视图已释放旧数据，等待 canonical verification。');
       setOrbState('IDLE');
-      const onCommitted = (event as CustomEvent<{ onCommitted?: () => void }>).detail?.onCommitted;
-      if (onCommitted) setTimeout(onCommitted, 0);
+      if (mounted && detail?.onCommitted) purgeCommitCallbacksRef.current.push(detail.onCommitted);
+      setPurgeCommitVersion((version) => version + 1);
     };
+    const handleRuntimeSnapshot = (event: Event) => {
+      const detail = (event as CustomEvent<{ imported?: ImportCommit | null; observationMode?: 'ACTIVE' | 'PRIVATE'; purge?: boolean; purgeVerified?: boolean }>).detail;
+      if (!detail) return;
+      if (detail.purge || detail.purgeVerified) uiEpochRef.current += 1;
+      if (detail.imported !== undefined) setImported(detail.imported);
+      if (detail.observationMode) setCanonicalPrivate(detail.observationMode === 'PRIVATE');
+      if (detail.purge) {
+        setReplaySnapshot(null);
+        setPreviewToken(null);
+        setOrbState('IDLE');
+      }
+      if (detail.purgeVerified) {
+        setDomainStatus('隐私清除已完成并经 canonical store 验证。');
+      } else if (!detail.purge && detail.imported !== undefined) {
+        setDomainStatus(detail.imported ? '本地 canonical store 已刷新。' : '本地 canonical store 已就绪；尚未提交 bundled fixture。');
+      }
+    };
+    bridgeWindow.__proagiPurgeUiBridgeCount = (bridgeWindow.__proagiPurgeUiBridgeCount ?? 0) + 1;
+    bridgeWindow.__proagiPurgeUiBridge = true;
     window.addEventListener('proagi:external-purge', handleExternalPurge);
-    return () => window.removeEventListener('proagi:external-purge', handleExternalPurge);
+    window.addEventListener('proagi:runtime-snapshot', handleRuntimeSnapshot);
+    return () => {
+      mounted = false;
+      pendingCallbacks.current.splice(0);
+      window.removeEventListener('proagi:external-purge', handleExternalPurge);
+      window.removeEventListener('proagi:runtime-snapshot', handleRuntimeSnapshot);
+      bridgeWindow.__proagiPurgeUiBridgeCount = Math.max(0, (bridgeWindow.__proagiPurgeUiBridgeCount ?? 1) - 1);
+      bridgeWindow.__proagiPurgeUiBridge = bridgeWindow.__proagiPurgeUiBridgeCount > 0;
+    };
   }, []);
+
+  useLayoutEffect(() => {
+    const callbacks = purgeCommitCallbacksRef.current.splice(0);
+    callbacks.forEach((callback) => callback());
+  }, [purgeCommitVersion]);
 
   useEffect(() => {
     let active = true;
+    const epoch = uiEpochRef.current;
     void runtimeRef.current!.start().then((snapshot) => {
-      if (!active) return;
+      if (!active || epoch !== uiEpochRef.current) return;
       setImported(snapshot.imported);
        setCanonicalPrivate(snapshot.observationMode === 'PRIVATE');
       if (snapshot.observationMode === 'PRIVATE') {
@@ -68,10 +136,10 @@ export function AppShell() {
       } else {
         setDomainStatus(snapshot.imported ? `已从本地 canonical store 恢复，cursor ${snapshot.cursor}。` : '本地 canonical store 已就绪；尚未提交 bundled fixture。');
       }
-    }).catch(() => {
-      if (!active) return;
+    }).catch((error) => {
+      if (!active || epoch !== uiEpochRef.current) return;
       setOrbState('ERROR');
-      setDomainStatus('本地 canonical store 无法打开；写操作已禁用。');
+      setDomainStatus(`本地 canonical store 无法打开（${safeErrorCode(error)}）；写操作已禁用。`);
     });
     return () => {
       active = false;
@@ -132,11 +200,13 @@ export function AppShell() {
   }, [deleteConfirmOpen]);
 
   const togglePrivacy = async () => {
+    const epoch = uiEpochRef.current;
     const nextMode = privateMode ? 'ACTIVE' : 'PRIVATE';
     try {
       const receipt = nextMode === 'PRIVATE'
         ? await runtimeRef.current!.pausePrivacy()
         : await runtimeRef.current!.resumePrivacy();
+      if (epoch !== uiEpochRef.current) return;
       setCanonicalPrivate(nextMode === 'PRIVATE');
        if (nextMode === 'PRIVATE') {
         setPreviewToken(null);
@@ -148,6 +218,7 @@ export function AppShell() {
         setAnnouncement(`隐私模式已关闭，privacy epoch ${receipt.privacyEpoch}；不会补录暂停期间事件。`);
       }
     } catch {
+      if (epoch !== uiEpochRef.current) return;
       setOrbState('ERROR');
       setDomainStatus('隐私模式事务失败；写操作保持受阻。');
     }
@@ -174,6 +245,7 @@ export function AppShell() {
   };
 
   const runBundledFixture = async () => {
+    const epoch = uiEpochRef.current;
     if (privateMode) {
       setDomainStatus('隐私模式中未导入；请先恢复观察。');
       return;
@@ -182,30 +254,36 @@ export function AppShell() {
     setPreviewBusy(true);
     try {
       const preview = await runtimeRef.current!.preview();
+      if (epoch !== uiEpochRef.current) return;
       setPreviewToken(preview.token);
       setOrbState('SUGGESTION');
       setDomainStatus(`预览已准备：${preview.acceptedCount} 条 synthetic 事件、${preview.episodeCount} 个 Episode、${preview.insightCount} 条 Insight；尚未提交。`);
       setAnnouncement('本地样例预览已准备，请明确确认后提交。');
     } catch {
+      if (epoch !== uiEpochRef.current) return;
       setOrbState('ERROR');
       setDomainStatus('预览失败；canonical store 未发生写入。');
     } finally {
-      setPreviewBusy(false);
+      if (epoch === uiEpochRef.current) setPreviewBusy(false);
     }
   };
 
   const commitBundledFixture = async () => {
+    const epoch = uiEpochRef.current;
     setOrbState('EXECUTING');
     try {
       if (!previewToken) throw new Error('ERR_PREVIEW_REQUIRED');
       const committed = await runtimeRef.current!.commit(previewToken);
+      if (epoch !== uiEpochRef.current) return;
       setImported(committed);
+      setReplaySnapshot(null);
       setPreviewToken(null);
       setDomainRevision((value) => value + 1);
       setOrbState(committed.output.claims.length ? 'SUGGESTION' : 'LEARNING');
       setDomainStatus(`已持久提交 ${committed.acceptedCount} 条测试事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`);
       setAnnouncement('本地样例已由 IndexedDB PreviewGuard 原子提交。');
     } catch {
+      if (epoch !== uiEpochRef.current) return;
       setPreviewToken(null);
       setOrbState('ERROR');
       setDomainStatus('提交失败；canonical store 未显示成功。');
@@ -213,6 +291,7 @@ export function AppShell() {
   };
 
   const performCorrection = async (action: Exclude<CorrectionAction, 'restore'>) => {
+    const epoch = uiEpochRef.current;
     if (action === 'delete') setDeletionBusy(true);
     if (!runtimeRef.current!.currentClaim()) {
       if (action === 'delete') setDeletionBusy(false);
@@ -221,10 +300,13 @@ export function AppShell() {
     }
     try {
       const result = await runtimeRef.current!.submit(action);
+      if (epoch !== uiEpochRef.current) return;
       if (action === 'delete' && result.ok) {
+        setReplaySnapshot(null);
         setPreviewToken(null);
         setImported((await runtimeRef.current!.snapshot()).imported);
       }
+      if (result.ok) setReplaySnapshot(null);
       setDomainRevision((value) => value + 1);
       setDomainStatus(result.ok
         ? (action === 'delete' ? 'Insight lineage 已从本地 canonical store 删除；无关事件与报告已保留。' : `${action} 已持久写入不可变 revision；可运行 Replay 验证。`)
@@ -232,6 +314,7 @@ export function AppShell() {
       setAnnouncement(result.ok ? '纠正已持久保存。' : '纠正尚未保存。');
       if (action === 'delete') setDeletionBusy(false);
     } catch (error) {
+      if (epoch !== uiEpochRef.current) return;
       const code = safeErrorCode(error);
       if (code === 'ERR_PURGE_CLIENTS_PENDING') setRecovery('blocked');
       setOrbState('ERROR');
@@ -248,14 +331,23 @@ export function AppShell() {
     await performCorrection(action);
   };
 
-  const runDomainReplay = () => {
+  const runDomainReplay = async () => {
+    const epoch = uiEpochRef.current;
     if (!imported) {
       setDomainStatus('请先导入 bundled fixture。');
       return;
     }
-    const replay = runtimeRef.current!.evaluateReplay();
-    setDomainStatus(`Replay 完成：${replay.output.claims.length} 条 live Insight。`);
-    setOrbState('SUGGESTION');
+    try {
+      const replay = await runtimeRef.current!.evaluateReplay();
+      if (epoch !== uiEpochRef.current) return;
+      setReplaySnapshot(replay);
+      setDomainStatus(`Replay 完成：${replay.output.claims.length} 条 live Insight。`);
+      setOrbState('SUGGESTION');
+    } catch (error) {
+      if (epoch !== uiEpochRef.current) return;
+      setOrbState('ERROR');
+      setDomainStatus(`Replay 失败（${safeErrorCode(error)}）；未显示成功。`);
+    }
   };
 
   const renderEmpty = (section: string) => (
@@ -268,7 +360,7 @@ export function AppShell() {
 
   const liveClaim = imported ? runtimeRef.current.currentClaim() : undefined;
   const hasLiveClaim = Boolean(liveClaim);
-  const viewModel = buildInsightPresentation(imported, liveClaim);
+  const viewModel = buildInsightPresentation(imported, liveClaim, replaySnapshot);
   const showEmpty = contentMode === 'empty' || !imported;
 
   return (
@@ -341,9 +433,9 @@ export function AppShell() {
             <p className="eyebrow">可运行 Insight Loop</p>
             <p className="domain-loop__status" role="status">{domainStatus}</p>
             <div className="button-row" aria-label="领域操作">
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('accept')}>接受 Insight</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('edit')}>编辑范围</button>
-              <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
+              <button type="button" className="button button--quiet" disabled={privateMode || !hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('accept')}>接受 Insight</button>
+              <button type="button" className="button button--quiet" disabled={privateMode || !hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('edit')}>编辑范围</button>
+              <button type="button" className="button button--quiet" disabled={privateMode || !hasLiveClaim || contentMode === 'stale'} onClick={() => applyCorrection('reject')}>驳回 Insight</button>
               <button type="button" className="button button--quiet" disabled={!hasLiveClaim || contentMode === 'stale' || deletionBusy} onClick={(event) => { deleteInvokerRef.current = event.currentTarget; void applyCorrection('delete'); }}>删除 Insight</button>
               <button type="button" className="button button--primary" disabled={!imported} onClick={runDomainReplay}>运行 Replay</button>
             </div>
@@ -423,7 +515,7 @@ export function AppShell() {
         <section className="replay-panel" aria-labelledby="replay-title">
           <div className="section-heading">
             <div><p className="section-number">05</p><h2 id="replay-title">Replay</h2></div>
-            <span className="replay-status"><span aria-hidden="true">{imported ? '✓' : '○'}</span> {imported ? '可确定性重放' : '尚未运行'}</span>
+            <span className="replay-status"><span aria-hidden="true">{replaySnapshot ? '✓' : '○'}</span> {replaySnapshot ? '可确定性重放' : '尚未运行'}</span>
           </div>
           {showEmpty ? renderEmpty('Replay') : (
             <div className="replay-grid">

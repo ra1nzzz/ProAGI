@@ -258,3 +258,13 @@
 - 关键 P1 已关闭：preview/privacy T0 竞态、并发 preview/raw buffer、commit response loss、transient command 持久化、KnowledgeVersion/Head 缺失、NFC key collision、假时间戳、Worker error/backpressure/allowlist、future projection cursor、recovery reserve accounting、13-sink Shadow registry、axe 与 CI evidence log。
 - 保留的条件项：完整 PortRequestContext/DomainResult、跨标签状态传播与删除协调、大 store cursor pagination、完整 lifecycle/artifact closed registry、Worker 在 bundled UI 产品路径的真实接线、全量 provenance graph evaluator。
 - 因上述范围项及 NVDA/人工视觉/hosted CI 未执行，最终自动化绿灯只支持 Gate 1 `CONDITIONAL`，不支持 `PASS` 或真实用户价值/真实桌面自动化声明。
+
+## Quiescence / Atomic Verify Hardening
+
+- RootCoordinator 已提升为模块级 `databaseName` registry：同一 JS realm 内的多个 adapter 共享 root registry、revision、active mutation count 与 quiescence。
+- 受审计 heap root 现在必须提供同步 `freeze`/`unfreeze` hooks；verify 获取 barrier 后先设置 quiescence，再调用 hooks，防止 hook 内启动新的 mutation。
+- `verifyDeletion` 的最终 IndexedDB readwrite transaction 覆盖 `ROOT_STORES`，在同一 Tv 内重读 journal/lease/meta、canonical 校验、扫描 IDB roots 与 frozen in-process roots，并提交 VERIFIED/tombstone/lease deletion/NORMAL meta。
+- 持久 `deletion_verification_receipt` 与 bounded `purgeWatermarks` 在同一最终 Tv 写入；receipt 绑定 audit hash、root revision、final journal hash、lease generation 与 fencing-token digest，response loss 可由 receipt 幂等恢复。
+- Runtime visibility catch-up 同时检查 active journal 与 durable watermark；冻结标签在 active journal 已消失后，可按 last durable cursor 与 target anchors 释放 stale heap，再 hydrate 当前 store。
+- `auditRoots` 在 final Tv 内重算 required purge ACK 集合；缺 ACK 返回 `CLIENTS_PENDING`，不能推进 VERIFIED。
+- 本轮已通过 typecheck/lint、privacy 15/15、integration 13/13；durable frozen-tab Playwright 2/2；cross-tab barrier Playwright 2/2。完整 release gate 尚未重跑。

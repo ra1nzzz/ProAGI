@@ -1,4 +1,35 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type CDPSession, type Page } from '@playwright/test';
+
+async function setLifecycleState(session: CDPSession, state: 'frozen' | 'active'): Promise<void> {
+  await session.send('Page.enable');
+  await session.send('Page.setWebLifecycleState', { state });
+}
+
+async function installE2eHarness(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let armed: string | null = null;
+    let reached: Promise<void> = Promise.resolve();
+    let signalReached: (() => void) | null = null;
+    let release: (() => void) | null = null;
+    (window as unknown as { __proagiE2e: Record<string, unknown> }).__proagiE2e = {
+      arm(name: string) {
+        armed = name;
+        reached = new Promise<void>((resolve) => { signalReached = resolve; });
+      },
+      waitForHit() { return reached; },
+      release(name: string) {
+        if (armed === name) release?.();
+      },
+      async hit(name: string) {
+        if (armed !== name) return;
+        signalReached?.();
+        await new Promise<void>((resolve) => { release = resolve; });
+        armed = null;
+        release = null;
+      },
+    };
+  });
+}
 
 async function readStore(page: Page, storeName: string): Promise<unknown[]> {
   return page.evaluate(async (name) => {
@@ -165,6 +196,66 @@ test('a second tab privacy epoch fences an older preview commit', async ({ page,
   await secondTab.close();
 });
 
+test('operation-scoped response loss reconciles one durable import', async ({ page }) => {
+  await installE2eHarness(page);
+  await page.goto('/');
+  await expect(page.locator('.domain-loop__status')).toContainText('本地 canonical store 已就绪');
+
+  await page.evaluate(async () => {
+    const harness = (window as unknown as { __proagiE2e: { runtime?: { importWithResponseLoss: () => Promise<void> } } }).__proagiE2e;
+    if (!harness.runtime) throw new Error('E2E runtime bridge unavailable');
+    await harness.runtime.importWithResponseLoss();
+  });
+
+  const business = await readStore(page, 'business') as Array<Record<string, unknown>>;
+  const ledgers = await readStore(page, 'ledger') as Array<Record<string, unknown>>;
+  expect(business.filter((record) => record.recordType === 'fixture_commit_v1')).toHaveLength(1);
+  expect(ledgers).toEqual([expect.objectContaining({ committedCursor: '1' })]);
+  await page.reload();
+  await expect(page.locator('.domain-loop__status')).toContainText('已从本地 canonical store 恢复');
+  await expect(page.getByRole('button', { name: '接受 Insight' })).toBeEnabled();
+});
+
+test('commit TOCTOU fails closed when privacy changes after persistence', async ({ page, context }) => {
+  await installE2eHarness(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: '预览本地样例' }).click();
+  await page.evaluate(() => {
+    (window as unknown as { __proagiE2e: { arm: (name: string) => void } }).__proagiE2e.arm('commit:after-persisted');
+  });
+  await page.getByRole('button', { name: '确认导入' }).click();
+  await page.evaluate(() => (window as unknown as { __proagiE2e: { waitForHit: () => Promise<void> } }).__proagiE2e.waitForHit());
+
+  const privacyTab = await context.newPage();
+  await privacyTab.goto('/');
+  await privacyTab.getByRole('button', { name: '暂停观察' }).click();
+  await expect(privacyTab.getByRole('heading', { name: '隐私模式已开启' })).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __proagiE2e: { release: (name: string) => void } }).__proagiE2e.release('commit:after-persisted'));
+
+  await expect(page.locator('.domain-loop__status')).toContainText('提交失败');
+  expect((await readStore(page, 'business') as Array<Record<string, unknown>>).filter((record) => record.recordType === 'fixture_commit_v1')).toHaveLength(1);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '隐私模式已开启' })).toBeVisible();
+  await privacyTab.close();
+});
+
+test('an in-flight durable commit survives a real Chromium frozen-to-active cycle', async ({ page, context }) => {
+  await installE2eHarness(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: '预览本地样例' }).click();
+  await page.evaluate(() => (window as unknown as { __proagiE2e: { arm: (name: string) => void } }).__proagiE2e.arm('commit:after-persisted'));
+  await page.getByRole('button', { name: '确认导入' }).click();
+  await page.evaluate(() => (window as unknown as { __proagiE2e: { waitForHit: () => Promise<void> } }).__proagiE2e.waitForHit());
+
+  const lifecycle = await context.newCDPSession(page);
+  await setLifecycleState(lifecycle, 'frozen');
+  await setLifecycleState(lifecycle, 'active');
+  await page.evaluate(() => (window as unknown as { __proagiE2e: { release: (name: string) => void } }).__proagiE2e.release('commit:after-persisted'));
+
+  await expect(page.locator('.domain-loop__status')).toContainText('已持久提交 4 条测试事件');
+  expect((await readStore(page, 'business') as Array<Record<string, unknown>>).filter((record) => record.recordType === 'fixture_commit_v1')).toHaveLength(1);
+});
+
 test('a second tab releases deleted lineage before purge audit completes', async ({ page, context }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '预览本地样例' }).click();
@@ -172,6 +263,7 @@ test('a second tab releases deleted lineage before purge audit completes', async
   await expect(page.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
 
   const secondTab = await context.newPage();
+  await installE2eHarness(secondTab);
   await secondTab.goto('/');
   await expect(secondTab.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
   await expect(secondTab.locator('.domain-loop__status')).toContainText('已从本地 canonical store 恢复');
@@ -181,8 +273,28 @@ test('a second tab releases deleted lineage before purge audit completes', async
   await page.keyboard.press('Escape');
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '删除 Insight' })).toBeFocused();
+  await secondTab.evaluate(() => (window as unknown as { __proagiE2e: { arm: (name: string) => void } }).__proagiE2e.arm('purge:before-release'));
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await page.getByRole('button', { name: '确认删除' }).click();
+  await secondTab.evaluate(() => (window as unknown as { __proagiE2e: { waitForHit: () => Promise<void> } }).__proagiE2e.waitForHit());
+  const lifecycle = await context.newCDPSession(secondTab);
+  await page.bringToFront();
+  await setLifecycleState(lifecycle, 'frozen');
+  await expect.poll(async () => {
+    const journals = await readStore(page, 'journal') as Array<Record<string, unknown>>;
+    return journals.some((record) => record.recordType === 'active_deletion_journal' && ['PURGE_PENDING', 'AUDITING'].includes(String(record.state)));
+  }).toBe(true);
+  const frozenJournal = (await readStore(page, 'journal') as Array<Record<string, unknown>>).find((record) => record.recordType === 'active_deletion_journal') as { id: string; purge: { generation: string; requiredClientIds: string[] } };
+  expect(frozenJournal.purge.requiredClientIds.length).toBeGreaterThan(1);
+  const frozenSystem = await readStore(page, 'system') as Array<Record<string, unknown>>;
+  const requiredClient = frozenSystem.find((record) => record.recordType === 'client_registration' && frozenJournal.purge.requiredClientIds.includes(String(record.clientId))) as { clientId?: string; state?: string } | undefined;
+  expect(requiredClient).toBeDefined();
+  expect(['ACTIVE', 'QUARANTINED']).toContain(requiredClient?.state);
+  const purgeAckClientIds = new Set(frozenSystem.filter((record) => record.recordType === 'purge_ack' && record.deletionId === frozenJournal.id && record.generation === frozenJournal.purge.generation).map((record) => String(record.clientId)));
+  expect(frozenJournal.purge.requiredClientIds.some((clientId) => !purgeAckClientIds.has(clientId))).toBe(true);
+  expect(await page.locator('.domain-loop__status').textContent()).not.toContain('Insight lineage 已从本地 canonical store 删除');
+  await setLifecycleState(lifecycle, 'active');
+  await secondTab.evaluate(() => (window as unknown as { __proagiE2e: { release: (name: string) => void } }).__proagiE2e.release('purge:before-release'));
   await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除', { timeout: 15_000 });
   await expect(secondTab.locator('.domain-loop__status')).toContainText('其他标签页已完成隐私清除', { timeout: 15_000 });
   await expect(secondTab.getByRole('button', { name: '接受 Insight' })).toBeDisabled();

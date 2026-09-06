@@ -23,6 +23,17 @@ export class InsightLoopService {
     this.guard = new PreviewGuard(tokenFactory);
   }
 
+  fork(): InsightLoopService {
+    const clone = new InsightLoopService();
+    clone.events = this.events;
+    clone.knowledge.hydrate(this.knowledge.snapshot());
+    return clone;
+  }
+
+  restoreEvents(events: readonly BehaviorEvent[]): void {
+    this.events = events;
+  }
+
   preview(utf8: string, now: number): { readonly token: string; readonly acceptedCount: number; readonly rejectedCount: number } {
     const parsed = parseFixtureJson(utf8);
     return {

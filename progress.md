@@ -374,3 +374,13 @@
 - 增加 audit receipt regression：`REGISTRY_INCOMPLETE` 审计结果必须携带 registry revision，确保最终验证协议具备可绑定的 revision 数据。
 - Release PR gate 通过：Vitest 64/64、Playwright 18/18、Smoke 2/2、typecheck/lint/CSP/audit/build 全部通过。
 - 已推送原子提交 `e9f5b4b`。
+
+## Goal Round 8 continuation / Atomic Verify Hardening
+
+- 完成同 `databaseName` adapter 的模块级 RootCoordinator 迁移；注册、注销、受控 root mutation 在 quiescence 期间 fail-closed，runtime root 接入同步 freeze hook。
+- 最终 verify 改为覆盖全部 `ROOT_STORES` 的单一 readwrite IndexedDB transaction：journal/lease canonical hash、required ACK、root revision、heap root scan 与 VERIFIED/tombstone/NORMAL 写入在同一 Tv 内完成。
+- 新增持久 `deletion_verification_receipt`（绑定 audit hash、root revision、final journal hash、lease generation/token digest），并支持模拟 response loss 后按 receipt 幂等恢复。
+- 新增 bounded durable `purgeWatermark(s)`；runtime 记录 last durable cursor，visibility catch-up 可在 active journal 已被删除后检测并清理 stale frozen-tab heap。
+- 增加 privacy atomic writer/hash/mutation regressions；privacy 15/15、integration 13/13、typecheck/lint 通过。
+- 增加 durable watermark Playwright 2/2；加强缺 ACK/required membership 与 pre-thaw completion assertions，cross-tab Playwright 2/2。
+- planning session-catchup 脚本路径不存在（已记录于 `task_plan.md`）；尚未执行最终 YT review 结论与 release gate、commit/push。

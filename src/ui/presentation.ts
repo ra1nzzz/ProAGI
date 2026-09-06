@@ -1,12 +1,15 @@
 import type { ImportCommit } from '../application/insightService';
 import type { WorkModelClaim } from '../domain/types';
+import type { ReplaySnapshotV1 } from '../domain/replay';
 import type { DemoViewModel } from './demoViewModel';
 
-export function buildInsightPresentation(commit: ImportCommit | null, liveClaim?: WorkModelClaim | null): DemoViewModel {
+export function buildInsightPresentation(commit: ImportCommit | null, liveClaim?: WorkModelClaim | null, replaySnapshot?: ReplaySnapshotV1 | null): DemoViewModel {
   if (!commit) return emptyPresentation;
   const output = commit.output;
   const baseClaim = output.claims[0];
   const claim = liveClaim === undefined ? baseClaim : liveClaim;
+  const replayOutput = replaySnapshot?.output ?? output;
+  const replayClaim = replayOutput.claims[0];
   const questions = output.questions.map((question) => ({
     eyebrow: '需要确认', title: question.prompt, detail: `${question.gapType} · 预计信息增益 ${question.expectedInformationGain.toFixed(2)}`, action: '审阅问题',
   }));
@@ -46,10 +49,10 @@ export function buildInsightPresentation(commit: ImportCommit | null, liveClaim?
     inbox: [...questions, ...shadows],
     replay: {
       fixture: 'developer-day-bundled-v1',
-      scope: claim ? [claim.scope.projectKey, claim.scope.activityKind].filter(Boolean).join(' / ') : '无 live scope',
+      scope: replayClaim ? [replayClaim.scope.projectKey, replayClaim.scope.activityKind].filter(Boolean).join(' / ') : '无 live scope',
       before: baseClaim?.statement ?? '无初始输出',
-      after: claim?.statement ?? '无 live 输出',
-      hash: output.snapshotHash.slice(0, 22),
+      after: replayClaim?.statement ?? '无 live 输出',
+      hash: (replaySnapshot?.snapshotHash ?? output.snapshotHash).slice(0, 22),
     },
   };
 }

@@ -13,6 +13,8 @@ import {
   type CommitResult,
   type Cursor,
   type DeletionPlanRecord,
+  type DeletionTerminalRecord,
+  type DeletionVerificationReceiptRecord,
   type DeletionWorkItemRecord,
   type ImportSessionRecord,
   type M1bRuntimeContract,
@@ -21,6 +23,7 @@ import {
   type ProjectionHeadRecord,
   type PhysicalStoreName,
   type PurgeAckRecord,
+  type PurgeWatermark,
   type ReachabilityResult,
   type RecoveryLeaseRecord,
   type StoreMetaRecord,
@@ -28,8 +31,9 @@ import {
   type StoredRecord,
 } from './m1bTypes';
 
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const NORMAL_WRITE_LIMIT = 100 * 1024 * 1024;
+const PREVIEW_RECEIPT_RETENTION_MS = 10 * 60 * 1000;
 const RECOVERY_RESERVE = 5 * 1024 * 1024;
 const LEASE_MS = 6_000;
 const ROOT_STORES: readonly PhysicalStoreName[] = ['meta', ...STORE_NAMES];
@@ -42,13 +46,74 @@ interface BufferedPreview {
 
 interface CommitOptions {
   simulateResponseLoss?: boolean;
-  preview?: { token: string; callerId: string; now: string };
+  preview?: { token: string; callerId: string };
+}
+
+export interface RootHooks {
+  readonly freeze: () => void;
+  readonly unfreeze: () => void;
 }
 
 interface RegisteredRoot {
   readonly rootId: string;
+  readonly registrationKey: string;
+  readonly ownerId: string;
   readonly revision: number;
   readonly read: () => readonly unknown[];
+  readonly hooks: RootHooks;
+}
+
+interface RootQuiescence {
+  readonly token: symbol;
+  readonly deletionId: string;
+  readonly generation: string;
+  readonly revision: number;
+  readonly frozenRoots: readonly RegisteredRoot[];
+}
+
+interface RootCoordinator {
+  readonly roots: Map<string, RegisteredRoot>;
+  revision: number;
+  activeMutations: number;
+  adapterRefs: number;
+  readonly adapters: Set<IndexedDbM1bAdapter>;
+  readonly deferredDisposals: Set<IndexedDbM1bAdapter>;
+  readonly mutationWaiters: Set<() => void>;
+  quiescence: RootQuiescence | null;
+}
+
+const rootCoordinators = new Map<string, RootCoordinator>();
+
+function rootCoordinatorFor(databaseName: string): RootCoordinator {
+  let coordinator = rootCoordinators.get(databaseName);
+  if (!coordinator) {
+    coordinator = { roots: new Map(), revision: 0, activeMutations: 0, adapterRefs: 0, adapters: new Set(), deferredDisposals: new Set(), mutationWaiters: new Set(), quiescence: null };
+    rootCoordinators.set(databaseName, coordinator);
+  }
+  return coordinator;
+}
+
+function maybeDropRootCoordinator(databaseName: string, coordinator: RootCoordinator): void {
+  if (coordinator.adapterRefs === 0 && coordinator.roots.size === 0 && coordinator.quiescence === null && coordinator.activeMutations === 0 && coordinator.deferredDisposals.size === 0 && rootCoordinators.get(databaseName) === coordinator) rootCoordinators.delete(databaseName);
+}
+
+function sweepConsumedPreviewRecords(store: IDBObjectStore, records: readonly unknown[], now: number): void {
+  const cutoff = now - PREVIEW_RECEIPT_RETENTION_MS;
+  const receiptIds = new Set<string>();
+  for (const value of records) {
+    if (!value || typeof value !== 'object') continue;
+    const record = value as Record<string, unknown>;
+    if (record.recordType === 'preview_commit_guard' && record.state === 'CONSUMED' && typeof record.recordId === 'string' && typeof record.writtenAt === 'string' && Date.parse(record.writtenAt) <= cutoff) {
+      if (typeof record.receiptId === 'string') receiptIds.add(record.receiptId);
+      store.delete(record.recordId);
+    }
+  }
+  for (const value of records) {
+    if (!value || typeof value !== 'object') continue;
+    const record = value as Record<string, unknown>;
+    if (record.recordType === 'observation_commit_receipt' && typeof record.recordId === 'string' && typeof record.writtenAt === 'string' && Date.parse(record.writtenAt) <= cutoff) store.delete(record.recordId);
+  }
+  receiptIds.forEach((receiptId) => store.delete(`preview-receipt:${receiptId}`));
 }
 
 export class IndexedDbM1bAdapter {
@@ -62,15 +127,26 @@ export class IndexedDbM1bAdapter {
   private db?: IDBDatabase;
   private opening?: Promise<IDBDatabase>;
   private readonly previewBuffers = new Map<Hash, BufferedPreview>();
-  private readonly inProcessRoots = new Map<string, RegisteredRoot>();
-  private rootRevision = 0;
+  private readonly adapterId = crypto.randomUUID();
+  private readonly ownedRootKeys = new Set<string>();
+  private readonly rootCoordinator: RootCoordinator;
+  private disposed = false;
 
-  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now) {}
+  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now) {
+    this.rootCoordinator = rootCoordinatorFor(databaseName);
+    if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
+    this.rootCoordinator.adapterRefs += 1;
+    this.rootCoordinator.adapters.add(this);
+    this.rootCoordinator.revision += 1;
+  }
 
   async open(): Promise<void> {
+    if (this.disposed) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
     if (this.db) return;
     if (this.opening) {
-      await this.opening;
+      const opened = await this.opening;
+      if (this.disposed) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
+      if (!this.db) this.db = opened;
       return;
     }
     const request = indexedDB.open(this.databaseName, DB_VERSION);
@@ -91,11 +167,17 @@ export class IndexedDbM1bAdapter {
         const changes = database.createObjectStore('changes', { keyPath: 'id' });
         changes.createIndex('byCursor', 'cursor', { unique: false });
       }
-      if ((event as IDBVersionChangeEvent).oldVersion === 0) request.transaction?.objectStore('meta').put(initialMeta());
+      const oldVersion = (event as IDBVersionChangeEvent).oldVersion;
+      if (oldVersion === 0) request.transaction?.objectStore('meta').put(initialMeta());
+      else if (oldVersion < 3) migrateLegacyMeta(request.transaction!);
     };
     this.opening = requestValue(request);
     try {
       const opened = await this.opening;
+      if (this.disposed) {
+        opened.close();
+        throw new M1bError('ERR_STORAGE_UNAVAILABLE');
+      }
       this.db = opened;
       opened.onversionchange = () => {
         opened.close();
@@ -112,21 +194,117 @@ export class IndexedDbM1bAdapter {
   }
 
   async destroy(): Promise<void> {
-    this.close();
+    if (this.disposed) return;
+    if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
+    this.dispose();
     await deleteDatabase(this.databaseName);
-    this.previewBuffers.clear();
-    this.inProcessRoots.clear();
   }
 
-  registerInProcessRoot(rootId: string, read: () => readonly unknown[]): () => void {
-    if (this.inProcessRoots.has(rootId)) throw new M1bError('ERR_DUPLICATE_ROOT');
-    const revision = ++this.rootRevision;
-    const entry = { rootId, revision, read };
-    this.inProcessRoots.set(rootId, entry);
+  dispose(): void {
+    if (this.disposed) return;
+    this.close();
+    this.previewBuffers.clear();
+    this.disposed = true;
+    if (this.rootCoordinator.quiescence) {
+      this.rootCoordinator.deferredDisposals.add(this);
+      return;
+    }
+    this.detachFromCoordinator();
+  }
+
+  private detachFromCoordinator(): void {
+    for (const registrationKey of this.ownedRootKeys) {
+      const root = this.rootCoordinator.roots.get(registrationKey);
+      if (root?.ownerId === this.adapterId) {
+        this.rootCoordinator.roots.delete(registrationKey);
+        this.rootCoordinator.revision += 1;
+      }
+    }
+    this.ownedRootKeys.clear();
+    if (this.rootCoordinator.adapters.delete(this)) this.rootCoordinator.revision += 1;
+    this.rootCoordinator.deferredDisposals.delete(this);
+    this.rootCoordinator.adapterRefs = Math.max(0, this.rootCoordinator.adapterRefs - 1);
+    maybeDropRootCoordinator(this.databaseName, this.rootCoordinator);
+  }
+
+  beginInProcessRootMutation(): () => void {
+    if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
+    this.rootCoordinator.activeMutations += 1;
+    let released = false;
     return () => {
-      if (this.inProcessRoots.get(rootId)?.revision !== revision) return;
-      this.inProcessRoots.delete(rootId);
-      this.rootRevision += 1;
+      if (released) return;
+      released = true;
+      this.rootCoordinator.activeMutations -= 1;
+      if (this.rootCoordinator.activeMutations === 0) {
+        const waiters = [...this.rootCoordinator.mutationWaiters];
+        this.rootCoordinator.mutationWaiters.clear();
+        waiters.forEach((resolve) => resolve());
+      }
+    };
+  }
+
+  private assertQuiescenceStable(): void {
+    const quiescence = this.rootCoordinator.quiescence;
+    if (!quiescence || quiescence.revision !== this.rootCoordinator.revision || this.rootCoordinator.activeMutations !== 0) {
+      throw new M1bError('ERR_PURGE_QUIESCENCE_CHANGED');
+    }
+  }
+
+  private async acquireRootQuiescence(deletionId: string, generation: string): Promise<() => void> {
+    if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCENCE_BUSY');
+    const token = Symbol('root-quiescence');
+    // Publish the barrier before waiting so no new mutation or topology change
+    // can enter while already-admitted work drains.
+    this.rootCoordinator.quiescence = { token, deletionId, generation, revision: this.rootCoordinator.revision, frozenRoots: [] };
+    if (this.rootCoordinator.activeMutations > 0) {
+      await new Promise<void>((resolve) => this.rootCoordinator.mutationWaiters.add(resolve));
+    }
+    const frozenRoots = [...this.rootCoordinator.roots.values()];
+    this.rootCoordinator.quiescence = { token, deletionId, generation, revision: this.rootCoordinator.revision, frozenRoots };
+    const frozen: RegisteredRoot[] = [];
+    try {
+      for (const root of frozenRoots) {
+        root.hooks.freeze();
+        frozen.push(root);
+      }
+    } catch (error) {
+      let firstError: unknown = error;
+      for (const root of frozen.reverse()) {
+        try { root.hooks.unfreeze(); } catch (unfreezeError) { firstError ??= unfreezeError; }
+      }
+      this.rootCoordinator.quiescence = null;
+      throw firstError;
+    }
+    return () => {
+      if (this.rootCoordinator.quiescence?.token !== token) return;
+      let firstError: unknown;
+      for (const root of [...frozenRoots].reverse()) {
+        try { root.hooks.unfreeze(); } catch (error) { firstError ??= error; }
+      }
+      this.rootCoordinator.quiescence = null;
+      const deferred = [...this.rootCoordinator.deferredDisposals];
+      this.rootCoordinator.deferredDisposals.clear();
+      for (const adapter of deferred) adapter.detachFromCoordinator();
+      if (firstError) throw new M1bError('ERR_PURGE_UNFREEZE');
+    };
+  }
+
+  registerInProcessRoot(rootId: string, read: () => readonly unknown[], hooks: RootHooks): () => void {
+    if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
+    const registrationKey = `${this.adapterId}:${rootId}`;
+    if (this.rootCoordinator.roots.has(registrationKey)) throw new M1bError('ERR_DUPLICATE_ROOT');
+    const revision = ++this.rootCoordinator.revision;
+    const entry = { rootId, registrationKey, ownerId: this.adapterId, revision, read, hooks };
+    this.rootCoordinator.roots.set(registrationKey, entry);
+    this.ownedRootKeys.add(registrationKey);
+    return () => {
+      if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
+      const current = this.rootCoordinator.roots.get(registrationKey);
+      if (current?.ownerId !== this.adapterId || current.revision !== revision) return;
+      this.rootCoordinator.roots.delete(registrationKey);
+      this.ownedRootKeys.delete(registrationKey);
+      this.rootCoordinator.revision += 1;
+      maybeDropRootCoordinator(this.databaseName, this.rootCoordinator);
     };
   }
 
@@ -140,6 +318,7 @@ export class IndexedDbM1bAdapter {
     const result = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
     await transactionDone(tx);
     if (!result) throw new M1bError('ERR_STORAGE_CORRUPT');
+    assertMetaWatermarks(result);
     return result;
   }
 
@@ -159,13 +338,55 @@ export class IndexedDbM1bAdapter {
     return values;
   }
 
+  async readPurgeFence(): Promise<{ meta: StoreMetaRecord; journals: ActiveDeletionJournalRecord[] }> {
+    const db = await this.database();
+    const tx = db.transaction(['meta', 'journal'], 'readonly');
+    const done = transactionDone(tx);
+    try {
+      const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
+       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
+      if (!meta) throw new M1bError('ERR_STORAGE_CORRUPT');
+      assertMetaWatermarks(meta);
+      assertJournalCollection(journals);
+      await done;
+      return { meta, journals };
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
+  async readCanonicalSnapshot(): Promise<{ meta: StoreMetaRecord; business: StoredRecord[]; heads: StoredRecord[] }> {
+    const db = await this.database();
+    const tx = db.transaction(['meta', 'business', 'heads'], 'readonly');
+    const done = transactionDone(tx);
+    try {
+      const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
+      const business = await requestValue<StoredRecord[]>(tx.objectStore('business').getAll());
+      const heads = await requestValue<StoredRecord[]>(tx.objectStore('heads').getAll());
+       assertStoredRecordCollection(business, 'ERR_BUSINESS_RECORD_HASH_INVALID');
+       assertStoredRecordCollection(heads, 'ERR_HEAD_RECORD_HASH_INVALID');
+      if (!meta) throw new M1bError('ERR_STORAGE_CORRUPT');
+      assertMetaWatermarks(meta);
+      await done;
+      return { meta, business, heads };
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
   async commit(batch: AtomicMutationBatch, options: Omit<CommitOptions, 'preview'> = {}): Promise<CommitResult> {
     return this.commitInternal(batch, options);
   }
 
   async setPrivacyMode(expectedCursor: Cursor, expectedPrivacyEpoch: number, mode: 'ACTIVE' | 'PRIVATE', idempotencyKey: string): Promise<CommitResult> {
-    const db = await this.database();
-    const tx = db.transaction(['meta', 'ledger', 'system'], 'readwrite');
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      const db = await this.database();
+    const tx = this.mutationTransaction(db, ['meta', 'ledger', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const metaStore = tx.objectStore('meta');
@@ -211,6 +432,9 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    } finally {
+      releaseMutation();
+    }
   }
 
   async stagePreview(input: {
@@ -222,15 +446,20 @@ export class IndexedDbM1bAdapter {
     privacyEpoch: number;
     expiresAt: string;
   }): Promise<{ token: string; guard: PreviewCommitGuardRecord }> {
-    if (input.bytes.byteLength > 262_144) throw new M1bError('ERR_CHUNK_LIMIT');
-    if (!Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= Date.now()) throw new M1bError('ERR_PREVIEW_EXPIRED');
-    this.sweepExpiredPreviewBuffers(Date.now());
+    return this.withRootMutation(async () => {
+    const bytes = input.bytes.slice();
+    const { callerId, idempotencyKey, inputHash, privacyEpoch, expiresAt, token: suppliedToken } = input;
+    if (bytes.byteLength > 262_144) throw new M1bError('ERR_CHUNK_LIMIT');
+    const now = this.clock();
+    if (inputHash !== sha256(new TextDecoder().decode(bytes))) throw new M1bError('ERR_PREVIEW_INPUT_MISMATCH');
+    if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= now) throw new M1bError('ERR_PREVIEW_EXPIRED');
+    this.sweepExpiredPreviewBuffers(now);
     const retainedBytes = [...this.previewBuffers.values()].reduce((sum, item) => sum + item.bytes.byteLength, 0);
-    if (retainedBytes + input.bytes.byteLength > 4_194_304) throw new M1bError('ERR_QUOTA_LOGICAL');
+    if (retainedBytes + bytes.byteLength > 4_194_304) throw new M1bError('ERR_QUOTA_LOGICAL');
     const db = await this.database();
-    const token = input.token ?? `${crypto.randomUUID()}${crypto.randomUUID()}`;
+    const token = suppliedToken ?? `${crypto.randomUUID()}${crypto.randomUUID()}`;
     const tokenHash = sha256(token);
-    const bufferHandleHash = hashBytes(input.bytes);
+    const bufferHandleHash = hashBytes(bytes);
     const recordId = `preview-guard:${tokenHash}`;
     const writtenAt = new Date().toISOString();
     const guardBase = {
@@ -239,61 +468,100 @@ export class IndexedDbM1bAdapter {
       writtenAt,
       tokenHash,
       bufferHandleHash,
-      inputHash: input.inputHash,
-      privacyEpoch: input.privacyEpoch,
-      callerId: input.callerId,
-      expiresAt: input.expiresAt,
+      inputHash: inputHash,
+      privacyEpoch: privacyEpoch,
+      callerId: callerId,
+      expiresAt: expiresAt,
       state: 'READY' as const,
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: idempotencyKey,
     };
     const guard: PreviewCommitGuardRecord = { ...guardBase, contentHash: hashCanonical(guardBase) };
-    const tx = db.transaction(['meta', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
-      assertMeta(meta, meta.cursor, input.privacyEpoch, true);
+      assertMeta(meta, meta.cursor, privacyEpoch, true);
+      assertNoPurgedPreviewReference(bytes, meta);
       const system = tx.objectStore('system');
-      const existing = await requestValue<Array<Partial<PreviewCommitGuardRecord>>>(system.getAll());
+      const existing = await requestValue<Array<Partial<PreviewCommitGuardRecord> & { recordId?: string; receiptId?: string; writtenAt?: string }>>(system.getAll());
+      sweepConsumedPreviewRecords(system, existing, now);
       for (const record of existing) {
-        if (record.recordType === 'preview_commit_guard' && record.state === 'READY' && record.recordId && record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) system.delete(record.recordId);
+        if (record.recordType === 'preview_commit_guard' && record.state === 'READY' && record.recordId && record.expiresAt && Date.parse(record.expiresAt) <= now) system.delete(record.recordId);
       }
       system.add(guard);
       await done;
-      this.previewBuffers.set(tokenHash, { bytes: input.bytes.slice(), bufferHandleHash, expiresAt: input.expiresAt });
+      this.previewBuffers.set(tokenHash, { bytes, bufferHandleHash, expiresAt: expiresAt });
       return { token, guard };
     } catch (error) {
       safeAbort(tx);
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
-  async commitPreview(token: string, callerId: string, batch: AtomicMutationBatch, now = new Date().toISOString(), simulateResponseLoss = false): Promise<CommitResult> {
-    return this.commitInternal(batch, { preview: { token, callerId, now }, simulateResponseLoss });
+  async bindPreviewBatch(token: string, batchHash: Hash): Promise<PreviewCommitGuardRecord> {
+    return this.withRootMutation(async () => {
+    const db = await this.database();
+    const tx = this.mutationTransaction(db, 'system', 'readwrite');
+    const done = transactionDone(tx);
+    try {
+      const store = tx.objectStore('system');
+      const guard = await requestValue<PreviewCommitGuardRecord | undefined>(store.get(`preview-guard:${sha256(token)}`));
+      if (!guard) throw new M1bError('ERR_PREVIEW_INVALID');
+      assertCanonicalHash(guard, 'ERR_PREVIEW_INVALID');
+      if (guard.state !== 'READY') throw new M1bError('ERR_PREVIEW_CONSUMED');
+      if (guard.batchHash && guard.batchHash !== batchHash) throw new M1bError('ERR_PREVIEW_BATCH_MISMATCH');
+      const base = { ...guard, batchHash, writtenAt: new Date().toISOString() };
+      const next: PreviewCommitGuardRecord = { ...base, contentHash: hashCanonical(withoutHash(base)) };
+      store.put(next);
+      await done;
+      return next;
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+    });
+  }
+
+  async commitPreview(token: string, callerId: string, batch: AtomicMutationBatch, _legacyNow?: string, simulateResponseLoss = false): Promise<CommitResult> {
+    return this.commitInternal(batch, { preview: { token, callerId }, simulateResponseLoss });
   }
 
   releasePreviewBuffer(token: string): void {
-    this.previewBuffers.delete(sha256(token));
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      this.previewBuffers.delete(sha256(token));
+    } finally {
+      releaseMutation();
+    }
   }
 
   async cancelPreview(token: string): Promise<void> {
+    return this.withRootMutation(async () => {
     const tokenHash = sha256(token);
-    this.previewBuffers.delete(tokenHash);
     const db = await this.database();
-    const tx = db.transaction('system', 'readwrite');
+    const tx = this.mutationTransaction(db, 'system', 'readwrite');
+    this.previewBuffers.delete(tokenHash);
     const done = transactionDone(tx);
     tx.objectStore('system').delete(`preview-guard:${tokenHash}`);
     await done;
+    });
   }
 
   async publishProjection(next: ProjectionHeadRecord, expectedSourceCursor: Cursor): Promise<{ applied: boolean; head: ProjectionHeadRecord }> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'projection'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'projection'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const store = tx.objectStore('projection');
+       assertProjectionHead(next, 'ERR_PROJECTION_HASH_INVALID');
       const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
-      const current = await requestValue<ProjectionHeadRecord | undefined>(store.get(next.projectionId));
+      if (meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_RECOVERY_REQUIRED');
+      assertNoPurgedReference({ kind: 'casProjectionHead', storeName: 'projection', expectedSourceCursor, next }, meta);
+       const current = await requestValue<ProjectionHeadRecord | undefined>(store.get(next.projectionId));
       const actual = current?.sourceCursor ?? '0';
       if (actual !== expectedSourceCursor) throw new M1bError('ERR_PROJECTION_STALE');
       if (BigInt(next.sourceCursor) < BigInt(actual) || BigInt(next.sourceCursor) > BigInt(meta.cursor)) throw new M1bError('ERR_PROJECTION_STALE');
@@ -305,11 +573,13 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async createImportSession(streamId: string, sessionId: string = crypto.randomUUID()): Promise<ImportSessionRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
@@ -334,11 +604,15 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async stageImportBatch(sessionId: string, records: readonly StoredRecord[], batchHash: Hash): Promise<ImportSessionRecord> {
+    return this.withRootMutation(async () => {
+    const snapshotRecords = structuredClone(records);
+    if (hashCanonical(snapshotRecords) !== batchHash) throw new M1bError('ERR_BATCH_HASH_MISMATCH');
     const db = await this.database();
-    const tx = db.transaction(['meta', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const metaStore = tx.objectStore('meta');
@@ -347,10 +621,14 @@ export class IndexedDbM1bAdapter {
       const key = `import-session:${sessionId}`;
       const session = await requestValue<ImportSessionRecord | undefined>(system.get(key));
       if (!session || !['RECEIVING', 'VALIDATED', 'COMMITTING'].includes(session.state)) throw new M1bError('ERR_IMPORT_SESSION_STATE');
+       assertCanonicalHash(session, 'ERR_IMPORT_SESSION_HASH_INVALID');
       if (session.privacyEpoch !== meta.privacyEpoch || meta.observationMode !== 'ACTIVE' || meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_PRIVACY_EPOCH_STALE');
-      let delta = 0;
-      for (const record of records) {
-        const staged = toStoredRecord(`import-stage:${sessionId}:${record.recordId}`, 'import_staging', { sessionId, record });
+      assertStoredRecordCollection(snapshotRecords, 'ERR_RECORD_HASH_INVALID');
+       if (!/^sha256:[0-9a-f]{64}$/.test(batchHash)) throw new M1bError('ERR_BATCH_HASH_MISMATCH');
+       let delta = 0;
+      for (const record of snapshotRecords) {
+        assertNoPurgedReference({ kind: 'insertImmutable', storeName: 'business', record }, meta);
+         const staged = toStoredRecord(`import-stage:${sessionId}:${record.recordId}`, 'import_staging', { sessionId, record });
         delta += estimateBytes(staged);
         system.add(staged);
       }
@@ -359,7 +637,7 @@ export class IndexedDbM1bAdapter {
         ...session,
         state: 'COMMITTING' as const,
         committedBatchHashes: [...session.committedBatchHashes, batchHash],
-        committedEventCount: session.committedEventCount + records.length,
+        committedEventCount: session.committedEventCount + snapshotRecords.length,
         writtenAt: new Date().toISOString(),
       };
       const next: ImportSessionRecord = { ...nextBase, contentHash: hashCanonical(withoutHash(nextBase)) };
@@ -372,11 +650,13 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async publishImportSession(sessionId: string, idempotencyKey: string): Promise<CommitResult> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'system', 'business', 'ledger', 'changes'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'system', 'business', 'ledger', 'changes'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const metaStore = tx.objectStore('meta');
@@ -386,6 +666,7 @@ export class IndexedDbM1bAdapter {
       const sessionKey = `import-session:${sessionId}`;
       const session = await requestValue<ImportSessionRecord | undefined>(system.get(sessionKey));
       if (!session) throw new M1bError('ERR_IMPORT_SESSION_STATE');
+       assertCanonicalHash(session, 'ERR_IMPORT_SESSION_HASH_INVALID');
       const batchHash = hashCanonical({ kind: 'publish-import', sessionId, hashes: session.committedBatchHashes });
       if (prior) {
         if (prior.batchHash !== batchHash) throw new M1bError('ERR_IDEMPOTENCY_CONFLICT');
@@ -397,12 +678,14 @@ export class IndexedDbM1bAdapter {
       const staged = (await requestValue<StoredRecord<{ sessionId: string; record: StoredRecord }>[] >(system.getAll()))
         .filter((record) => record.recordType === 'import_staging' && record.payload?.sessionId === sessionId);
       if (staged.length !== session.committedEventCount) throw new M1bError('ERR_IMPORT_COUNT_MISMATCH');
+       assertStoredRecordCollection(staged, 'ERR_RECORD_HASH_INVALID');
       const nextCursor = incrementCursor(meta.cursor);
       const affectedRefs: { recordType: string; recordId: string }[] = [];
       let reclaimed = 0;
       staged.sort((a, b) => a.recordId.localeCompare(b.recordId));
       for (const stagedRecord of staged) {
         const record = stagedRecord.payload.record;
+         assertCanonicalHash(record, 'ERR_RECORD_HASH_INVALID');
         tx.objectStore('business').add(record);
         system.delete(stagedRecord.recordId);
         reclaimed += estimateBytes(stagedRecord);
@@ -422,11 +705,13 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async cancelImportSession(sessionId: string): Promise<void> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'system'], 'readwrite');
     const done = transactionDone(tx);
     const system = tx.objectStore('system');
     const metaStore = tx.objectStore('meta');
@@ -452,20 +737,30 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async scanPublishedBusiness(): Promise<StoredRecord[]> {
-    return this.getAll<StoredRecord>('business');
+    const records = await this.getAll<StoredRecord>('business');
+    assertStoredRecordCollection(records, 'ERR_BUSINESS_RECORD_HASH_INVALID');
+    return records;
   }
 
   async registerClient(clientId: string, now = Date.now()): Promise<ClientRegistrationRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['system', 'journal'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['system', 'journal'], 'readwrite');
     const done = transactionDone(tx);
     try {
-      const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
-      const active = journals.find((journal) => journal.recordType === 'active_deletion_journal' && journal.state !== 'FAILED');
-      const state: ClientRegistrationRecord['state'] = active ? 'QUARANTINED' : 'ACTIVE';
+       const current = await requestValue<ClientRegistrationRecord | undefined>(tx.objectStore('system').get(`client:${clientId}`));
+       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
+      assertJournalCollection(journals);
+       const active = journals.find((journal) => journal.recordType === 'active_deletion_journal' && journal.state !== 'FAILED');
+       if (active?.purge.sealedAt) throw new M1bError('ERR_PURGE_SEALED_RETRY');
+       const failed = journals.some((journal) => journal.recordType === 'active_deletion_journal' && journal.state === 'FAILED');
+       if (failed) throw new M1bError('ERR_RECOVERY_FAILED');
+       const stickyQuarantine = !active && current?.state === 'QUARANTINED' && Boolean(current.purgeGeneration) && current.purgeAckGeneration !== current.purgeGeneration;
+       const state: ClientRegistrationRecord['state'] = active || stickyQuarantine ? 'QUARANTINED' : 'ACTIVE';
       const base = {
         recordId: `client:${clientId}`,
         recordType: 'client_registration' as const,
@@ -473,7 +768,8 @@ export class IndexedDbM1bAdapter {
         clientId,
         leaseExpiresAt: new Date(now + LEASE_MS).toISOString(),
         state,
-        purgeGeneration: active?.purge.generation,
+        purgeGeneration: active?.purge.generation ?? (stickyQuarantine ? current?.purgeGeneration : undefined),
+         purgeAckGeneration: current?.purgeAckGeneration,
       };
       const record: ClientRegistrationRecord = { ...base, contentHash: hashCanonical(base) };
       tx.objectStore('system').put(record);
@@ -488,17 +784,20 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async closeClient(clientId: string, now = Date.now()): Promise<void> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction('system', 'readwrite');
+    const tx = this.mutationTransaction(db, 'system', 'readwrite');
     const done = transactionDone(tx);
     try {
       const store = tx.objectStore('system');
       const record = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
       if (record?.recordType === 'client_registration') {
-        const next = { ...record, state: 'CLOSING' as const, leaseExpiresAt: new Date(now).toISOString(), writtenAt: new Date(now).toISOString() };
+        assertClientRegistration(record);
+         const next = { ...record, state: 'CLOSING' as const, leaseExpiresAt: new Date(now).toISOString(), writtenAt: new Date(now).toISOString() };
         store.put({ ...next, contentHash: hashCanonical(withoutHash(next)) });
       }
       await done;
@@ -507,21 +806,29 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async renewClient(clientId: string, now = Date.now()): Promise<ClientRegistrationRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['system', 'journal'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['system', 'journal'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const store = tx.objectStore('system');
       const current = await requestValue<ClientRegistrationRecord | undefined>(store.get(`client:${clientId}`));
       if (!current || current.recordType !== 'client_registration') throw new M1bError('ERR_CLIENT_NOT_REGISTERED');
       if (current.state === 'CLOSING') throw new M1bError('ERR_CLIENT_CLOSING');
+       assertClientRegistration(current);
       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
-      const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
-      const quarantined = Boolean(active);
-      const next = { ...current, state: quarantined ? 'QUARANTINED' as const : current.state, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString(), ...(active ? { purgeGeneration: active.purge.generation } : {}) };
+      assertJournalCollection(journals);
+       const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
+       if (active?.purge.sealedAt) throw new M1bError('ERR_PURGE_SEALED_RETRY');
+       const failed = journals.some((item) => item.recordType === 'active_deletion_journal' && item.state === 'FAILED');
+       if (failed) throw new M1bError('ERR_RECOVERY_FAILED');
+       const stickyQuarantine = !active && current.state === 'QUARANTINED' && Boolean(current.purgeGeneration) && current.purgeAckGeneration !== current.purgeGeneration;
+       const quarantined = Boolean(active) || stickyQuarantine;
+       const next = { ...current, state: quarantined ? 'QUARANTINED' as const : 'ACTIVE' as const, leaseExpiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString(), ...(active || stickyQuarantine ? { purgeGeneration: active?.purge.generation ?? current.purgeGeneration } : { purgeGeneration: undefined }) };
       if (active && !active.purge.sealedAt && !active.purge.requiredClientIds.includes(clientId)) {
         tx.objectStore('journal').put(updateJournalHash({ ...active, purge: { ...active.purge, requiredClientIds: [...active.purge.requiredClientIds, clientId].sort() }, updatedAt: new Date(now).toISOString() }));
       }
@@ -534,66 +841,84 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
-  async planDeletion(target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchors?: readonly string[] },  cause: DeletionPlanRecord['cause'] = 'user-delete'): Promise<DeletionPlanRecord> {
-    const db = await this.database();
-    const tx = db.transaction([...ROOT_STORES], 'readonly');
-    const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
-    const snapshot = await snapshotHash(tx);
-    await transactionDone(tx);
-    const base = {
-      recordId: `deletion-plan:${crypto.randomUUID()}`,
-      recordType: 'deletion_plan' as const,
-      writtenAt: new Date().toISOString(),
-      target,
-      cause,
-      baseCursor: meta.cursor,
-      basePrivacyEpoch: meta.privacyEpoch,
-      baseSnapshotHash: snapshot,
-      closureRulesHash: hashCanonical({ roots: ROOT_STORES, version: 'm1b-root-registry-v1' }),
-    };
-    const planHash = hashCanonical(base);
-    return { ...base, planHash, contentHash: hashCanonical({ ...base, planHash }) };
+  async planDeletion(target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchorDigests?: readonly Hash[] }, cause: DeletionPlanRecord['cause'] = 'user-delete'): Promise<DeletionPlanRecord> {
+    return this.withRootMutation(async () => {
+      const targetSnapshot = structuredClone(target);
+      const db = await this.database();
+      const tx = db.transaction([...ROOT_STORES], 'readonly');
+      const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
+      const snapshot = await snapshotHash(tx);
+      await transactionDone(tx);
+      const base = {
+        recordId: `deletion-plan:${crypto.randomUUID()}`,
+        recordType: 'deletion_plan' as const,
+        writtenAt: new Date().toISOString(),
+        target: targetSnapshot,
+        cause,
+        baseCursor: meta.cursor,
+        basePrivacyEpoch: meta.privacyEpoch,
+        baseSnapshotHash: snapshot,
+        closureRulesHash: hashCanonical({ roots: ROOT_STORES, version: 'm1b-root-registry-v1' }),
+      };
+      const planHash = hashCanonical(base);
+      return { ...base, planHash, contentHash: hashCanonical({ ...base, planHash }) };
+    });
   }
 
   async fenceDeletion(plan: DeletionPlanRecord, ownerClientId: string, now = Date.now()): Promise<{ journal: ActiveDeletionJournalRecord; lease: RecoveryLeaseRecord }> {
+    return this.withRootMutation(async () => {
+    const planSnapshot = structuredClone(plan);
     const db = await this.database();
-    const tx = db.transaction([...ROOT_STORES], 'readwrite');
+    const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
     const done = transactionDone(tx);
     try {
       const metaStore = tx.objectStore('meta');
       const meta = await requestValue<StoreMetaRecord>(metaStore.get('canonical'));
+      if (!meta) throw new M1bError('ERR_STORAGE_CORRUPT');
+      assertMetaWatermarks(meta);
+      assertCanonicalHash(planSnapshot, 'ERR_DELETION_PLAN_HASH_INVALID');
+      if (planSnapshot.target.lineageAnchorDigests?.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest))) throw new M1bError('ERR_DELETION_PLAN_HASH_INVALID');
       const currentSnapshotHash = await snapshotHash(tx);
       const recomputedPlanHash = hashCanonical({
-        recordId: plan.recordId,
-        recordType: plan.recordType,
-        writtenAt: plan.writtenAt,
-        target: plan.target,
-        cause: plan.cause,
-        baseCursor: plan.baseCursor,
-        basePrivacyEpoch: plan.basePrivacyEpoch,
-        baseSnapshotHash: plan.baseSnapshotHash,
-        closureRulesHash: plan.closureRulesHash,
+        recordId: planSnapshot.recordId,
+        recordType: planSnapshot.recordType,
+        writtenAt: planSnapshot.writtenAt,
+        target: planSnapshot.target,
+        cause: planSnapshot.cause,
+        baseCursor: planSnapshot.baseCursor,
+        basePrivacyEpoch: planSnapshot.basePrivacyEpoch,
+        baseSnapshotHash: planSnapshot.baseSnapshotHash,
+        closureRulesHash: planSnapshot.closureRulesHash,
       });
-      if (meta.cursor !== plan.baseCursor || meta.privacyEpoch !== plan.basePrivacyEpoch || meta.recoveryMode !== 'NORMAL' || currentSnapshotHash !== plan.baseSnapshotHash || recomputedPlanHash !== plan.planHash) throw new M1bError('ERR_CURSOR_CONFLICT');
+      if (meta.cursor !== planSnapshot.baseCursor || meta.privacyEpoch !== planSnapshot.basePrivacyEpoch || meta.recoveryMode !== 'NORMAL' || currentSnapshotHash !== planSnapshot.baseSnapshotHash || recomputedPlanHash !== planSnapshot.planHash) throw new M1bError('ERR_CURSOR_CONFLICT');
       const generation = crypto.randomUUID();
-      const requiredClientIds = (await requestValue<ClientRegistrationRecord[]>(tx.objectStore('system').getAll()))
-        .filter((record) => record.recordType === 'client_registration' && record.state === 'ACTIVE' && Date.parse(record.leaseExpiresAt) > now)
+      const registrations = (await requestValue<Array<ClientRegistrationRecord | StoredRecord>>(tx.objectStore('system').getAll())).filter((record): record is ClientRegistrationRecord => record.recordType === 'client_registration');
+       registrations.forEach((record) => assertClientRegistration(record));
+       const requiredClientIds = registrations
+        .filter((record) => record.state === 'ACTIVE' && Date.parse(record.leaseExpiresAt) > now)
         .map((record) => record.clientId)
         .sort();
-      const journalBase: ActiveDeletionJournalRecord = {
+      const systemStore = tx.objectStore('system');
+       for (const registration of registrations) {
+         if (!requiredClientIds.includes(registration.clientId)) continue;
+         const quarantined = { ...registration, state: 'QUARANTINED' as const, purgeGeneration: generation, writtenAt: new Date(now).toISOString() };
+         systemStore.put({ ...quarantined, contentHash: hashCanonical(withoutHash(quarantined)) });
+       }
+       const journalBase: ActiveDeletionJournalRecord = {
         id: `active-deletion:${crypto.randomUUID()}`,
         recordType: 'active_deletion_journal',
         state: 'FENCED',
-        planId: plan.recordId,
-        planHash: plan.planHash,
-        targetId: plan.target.recordId,
-        targetHash: plan.target.contentHash,
-        targetType: plan.target.recordType,
-        targetAnchors: [...new Set([plan.target.recordId, plan.target.contentHash, ...(plan.target.lineageAnchors ?? [])])].sort(),
-        baseCursor: plan.baseCursor,
-        basePrivacyEpoch: plan.basePrivacyEpoch,
+        planId: planSnapshot.recordId,
+        planHash: planSnapshot.planHash,
+        targetId: planSnapshot.target.recordId,
+        targetHash: planSnapshot.target.contentHash,
+        targetType: planSnapshot.target.recordType,
+        targetAnchors: [...new Set([sha256(planSnapshot.target.recordId), sha256(planSnapshot.target.contentHash), ...(planSnapshot.target.lineageAnchorDigests ?? [])])].sort(),
+        baseCursor: planSnapshot.baseCursor,
+        basePrivacyEpoch: planSnapshot.basePrivacyEpoch,
         enumeration: { registryIndex: 0, pageOffset: 0, complete: false, enumeratedCount: 0 },
         progress: { nextOrdinal: '0', completedCount: 0, totalCount: 0 },
         purge: { generation, cutoff: new Date(now).toISOString(), requiredClientIds },
@@ -620,17 +945,20 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async enumerateDeletionPage(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction([...ROOT_STORES], 'readwrite');
+    const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
     const done = transactionDone(tx);
     try {
       await assertLease(tx, ownerClientId, fencingToken, now);
       const journalStore = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
       if (!journal || journal.state !== 'FENCED') throw new M1bError('ERR_DELETION_STATE');
+       assertDeletionJournal(journal);
       const root = ROOT_STORES[journal.enumeration.registryIndex];
       if (!root) {
         const completed = updateJournalHash({ ...journal, state: 'DELETING', enumeration: { ...journal.enumeration, complete: true }, updatedAt: new Date(now).toISOString() });
@@ -687,17 +1015,20 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async deleteChunk(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction([...ROOT_STORES], 'readwrite');
+    const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
     const done = transactionDone(tx);
     try {
       await assertLease(tx, ownerClientId, fencingToken, now);
       const journalStore = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
       if (!journal || journal.state !== 'DELETING') throw new M1bError('ERR_DELETION_STATE');
+       assertDeletionJournal(journal);
       const all = await requestValue<DeletionWorkItemRecord[]>(journalStore.getAll());
       const work = all.filter((item) => item.deletionId === deletionId && item.id.startsWith('work:')).sort((a, b) => BigInt(a.ordinal) < BigInt(b.ordinal) ? -1 : 1);
       const selected = work.slice(0, limit);
@@ -729,16 +1060,20 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async acknowledgePurge(deletionId: string, generation: string, clientId: string, now = Date.now()): Promise<PurgeAckRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['journal', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['journal', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(tx.objectStore('journal').get(deletionId));
       if (!journal || journal.purge.generation !== generation) throw new M1bError('ERR_PURGE_GENERATION_STALE');
-      if (!journal.purge.requiredClientIds.includes(clientId)) throw new M1bError('ERR_PURGE_CLIENT_UNKNOWN');
+       assertDeletionJournal(journal);
+      if (journal.state !== 'PURGE_PENDING' || journal.purge.sealedAt) throw new M1bError('ERR_PURGE_SEALED');
+       if (!journal.purge.requiredClientIds.includes(clientId)) throw new M1bError('ERR_PURGE_CLIENT_UNKNOWN');
       const base = { recordId: `purge-ack:${deletionId}:${generation}:${clientId}`, recordType: 'purge_ack' as const, writtenAt: new Date(now).toISOString(), deletionId, generation, clientId };
       const ack: PurgeAckRecord = { ...base, contentHash: hashCanonical(base) };
       tx.objectStore('system').put(ack);
@@ -749,11 +1084,13 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async retryPurge(deletionId: string, ownerClientId: string, fencingToken: string, liveClientIds: readonly string[], now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'journal', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       await assertLease(tx, ownerClientId, fencingToken, now);
@@ -761,7 +1098,8 @@ export class IndexedDbM1bAdapter {
       const system = tx.objectStore('system');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
       if (!journal || journal.state !== 'PURGE_PENDING') throw new M1bError('ERR_DELETION_STATE');
-      const oldGeneration = journal.purge.generation;
+      assertDeletionJournal(journal);
+       const oldGeneration = journal.purge.generation;
       const records = await requestValue<Array<PurgeAckRecord | ClientRegistrationRecord>>(system.getAll());
       for (const record of records) {
         if (record.recordType === 'purge_ack' && record.deletionId === deletionId && record.generation === oldGeneration) system.delete(record.recordId);
@@ -784,54 +1122,68 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async sealAndAudit(deletionId: string, ownerClientId: string, fencingToken: string, now = Date.now()): Promise<ReachabilityResult> {
-    const db = await this.database();
-    const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
-    const done = transactionDone(tx);
-    let sealed: ActiveDeletionJournalRecord;
-    try {
-      await assertLease(tx, ownerClientId, fencingToken, now);
-      const journalStore = tx.objectStore('journal');
-      const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
-      if (!journal || (journal.state !== 'PURGE_PENDING' && journal.state !== 'AUDITING')) throw new M1bError('ERR_DELETION_STATE');
-      const acks = (await requestValue<PurgeAckRecord[]>(tx.objectStore('system').getAll())).filter((record) => record.recordType === 'purge_ack' && record.deletionId === deletionId && record.generation === journal.purge.generation);
-      const ackIds = new Set(acks.map((ack) => ack.clientId));
-      const allPurged = journal.purge.requiredClientIds.every((id) => ackIds.has(id));
-      if (!allPurged) {
+    return this.withRootMutation(async () => {
+      const db = await this.database();
+      const tx = this.mutationTransaction(db, ['meta', 'journal', 'system'], 'readwrite');
+      const done = transactionDone(tx);
+      let sealed: ActiveDeletionJournalRecord;
+      let lease: RecoveryLeaseRecord;
+      try {
+        lease = await assertLease(tx, ownerClientId, fencingToken, now);
+        const journalStore = tx.objectStore('journal');
+        const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
+        if (!journal || (journal.state !== 'PURGE_PENDING' && journal.state !== 'AUDITING')) throw new M1bError('ERR_DELETION_STATE');
+        assertDeletionJournal(journal);
+        const acks = (await requestValue<Array<PurgeAckRecord | StoredRecord>>(tx.objectStore('system').getAll())).filter((record): record is PurgeAckRecord => {
+          if (!isPurgeAck(record) || record.deletionId !== deletionId || record.generation !== journal.purge.generation) return false;
+          assertCanonicalHash(record, 'ERR_PURGE_ACK_HASH_INVALID');
+          return true;
+        });
+        const ackIds = new Set(acks.map((ack) => ack.clientId));
+        const allPurged = journal.purge.requiredClientIds.every((id) => ackIds.has(id));
+        if (!allPurged) {
+          await done;
+          return {
+            deletionId,
+            generation: journal.purge.generation,
+            receipts: [],
+            reachableCount: 0,
+            allRequiredClientsPurged: false,
+            registryComplete: true,
+            outcome: 'CLIENTS_PENDING',
+            registryRevision: this.rootCoordinator.revision,
+            journalHash: journal.contentHash,
+            leaseGeneration: lease.generation,
+            leaseFencingTokenHash: sha256(lease.fencingToken),
+            coverage: 'single-browser-in-process',
+          };
+        }
+        sealed = updateJournalHash({ ...journal, state: 'AUDITING', purge: { ...journal.purge, sealedAt: new Date(now).toISOString() }, updatedAt: new Date(now).toISOString() });
+        journalStore.put(sealed);
+        await bumpRecoveryCursor(tx);
         await done;
-        return {
-          deletionId,
-          generation: journal.purge.generation,
-          receipts: [],
-          reachableCount: 0,
-          allRequiredClientsPurged: false,
-          registryComplete: true,
-          outcome: 'CLIENTS_PENDING',
-          coverage: 'single-browser-in-process',
-        };
+      } catch (error) {
+        safeAbort(tx);
+        await done.catch(() => undefined);
+        throw normalizeIdbError(error);
       }
-      sealed = updateJournalHash({ ...journal, state: 'AUDITING', purge: { ...journal.purge, sealedAt: new Date(now).toISOString() }, updatedAt: new Date(now).toISOString() });
-      journalStore.put(sealed);
-      await bumpRecoveryCursor(tx);
-      await done;
-    } catch (error) {
-      safeAbort(tx);
-      await done.catch(() => undefined);
-      throw normalizeIdbError(error);
-    }
 
-    const result = await this.auditRoots(sealed);
-    if (result.outcome === 'CLEAN') {
-      await this.updateJournalState(deletionId, ownerClientId, fencingToken, 'AUDITING', 'FINALIZING', now);
-    }
-    return result;
+      const result = await this.auditRoots(sealed, lease);
+      if (result.outcome === 'CLEAN') {
+        await this.updateJournalState(deletionId, ownerClientId, fencingToken, 'AUDITING', 'FINALIZING', now);
+      }
+      return result;
+    });
   }
 
   async finalizeDeletionPage(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'journal', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       await assertLease(tx, ownerClientId, fencingToken, now);
@@ -839,9 +1191,10 @@ export class IndexedDbM1bAdapter {
       const system = tx.objectStore('system');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
       if (!journal || journal.state !== 'FINALIZING') throw new M1bError('ERR_DELETION_STATE');
+       assertDeletionJournal(journal);
       const records = await requestValue<Array<StoredRecord | PurgeAckRecord>>(system.getAll());
       const removable = records.filter((record) =>
-        (isPurgeAck(record) && record.deletionId === deletionId) || record.recordId === journal.planId,
+        record.recordId === journal.planId,
       ).slice(0, limit);
       let reclaimed = 0;
       removable.forEach((record) => {
@@ -849,7 +1202,7 @@ export class IndexedDbM1bAdapter {
         reclaimed += estimateBytes(record);
       });
       const remaining = records.filter((record) =>
-        (isPurgeAck(record) && record.deletionId === deletionId) || record.recordId === journal.planId,
+        record.recordId === journal.planId,
       ).length - removable.length;
       const next = updateJournalHash({ ...journal, finalizing: { complete: remaining === 0, removedControlCount: journal.finalizing.removedControlCount + removable.length }, updatedAt: new Date(now).toISOString() });
       journalStore.put(next);
@@ -861,39 +1214,165 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
-  async verifyDeletion(deletionId: string, ownerClientId: string, fencingToken: string, now = Date.now()): Promise<{ verifiedId: string; tombstoneId: string }> {
-    const db = await this.database();
+  async verifyDeletion(deletionId: string, ownerClientId: string, fencingToken: string, now = Date.now(), simulateResponseLoss = false): Promise<{ verifiedId: string; tombstoneId: string }> {
+    const receipt = await this.readCommittedVerificationReceipt(deletionId);
+    if (receipt) return { verifiedId: receipt.verifiedId, tombstoneId: receipt.tombstoneId };
     const before = await this.getRecord<ActiveDeletionJournalRecord>('journal', deletionId);
     if (!before || before.state !== 'FINALIZING' || !before.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');
-    const audit = await this.auditRoots(before);
-    if (audit.outcome !== 'CLEAN') throw new M1bError('ERR_DELETE_REACHABLE');
-    const verificationClock = this.clock();
-    const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
+    const releaseQuiescence = await this.acquireRootQuiescence(deletionId, before.purge.generation);
+    try {
+      return await this.verifyDeletionUnderQuiescence(deletionId, ownerClientId, fencingToken, now, simulateResponseLoss);
+    } finally {
+      releaseQuiescence();
+    }
+  }
+
+  private async readCommittedVerificationReceipt(deletionId: string): Promise<DeletionVerificationReceiptRecord | undefined> {
+    const db = await this.database();
+    const tx = db.transaction(['meta', 'journal', 'system', 'audit'], 'readonly');
     const done = transactionDone(tx);
     try {
-      await assertLease(tx, ownerClientId, fencingToken, verificationClock);
+      const receipt = await this.verificationReceiptInTransaction(tx, deletionId);
+      await done;
+      return receipt;
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
+  private async verificationReceiptInTransaction(tx: IDBTransaction, deletionId: string): Promise<DeletionVerificationReceiptRecord | undefined> {
+    const receipt = await requestValue<DeletionVerificationReceiptRecord | undefined>(tx.objectStore('system').get(`verification:${sha256(deletionId)}`));
+    if (!receipt) return undefined;
+    assertVerificationReceipt(receipt, deletionId);
+    const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
+    const terminal = await requestValue<DeletionTerminalRecord | undefined>(tx.objectStore('journal').get(receipt.verifiedId));
+    const tombstone = await requestValue<StoredRecord<{ id: string; deletedType: string; deletedAt: string }> | undefined>(tx.objectStore('system').get(`tombstone:${receipt.tombstoneId}`));
+    const auditRecord = await requestValue<StoredRecord<ReachabilityResult> | undefined>(tx.objectStore('audit').get(`audit:${sha256(receipt.deletionId)}`));
+    if (!meta) throw new M1bError('ERR_VERIFY_RECEIPT_INVALID');
+    assertMetaWatermarks(meta);
+    if (auditRecord) assertCanonicalHash(auditRecord, 'ERR_VERIFY_RECEIPT_INVALID');
+    if (terminal) assertCanonicalHash(terminal, 'ERR_VERIFY_RECEIPT_INVALID');
+    if (tombstone) assertCanonicalHash(tombstone, 'ERR_VERIFY_RECEIPT_INVALID');
+    const watermarks = [...(meta.purgeWatermarks ?? []), ...(meta.purgeWatermark && !(meta.purgeWatermarks ?? []).some((item) => item.contentHash === meta.purgeWatermark?.contentHash) ? [meta.purgeWatermark] : [])];
+    watermarks.forEach((watermark) => assertCanonicalHash(watermark, 'ERR_VERIFY_RECEIPT_INVALID'));
+    const watermark = watermarks.find((item) => item.deletionId === deletionId && item.generation === receipt.generation && item.journalHash === receipt.journalHash && item.leaseGeneration === receipt.leaseGeneration);
+    const permanent = new Set(meta.purgedAnchorDigests ?? []);
+    const receiptAnchorProof = Array.isArray(receipt.anchorDigests) && receipt.anchorDigests.every((digest) => permanent.has(digest));
+    const companionStateValid = terminal?.id === receipt.verifiedId
+      && terminal.recordType === 'deletion_terminal'
+      && terminal.state === 'VERIFIED'
+      && tombstone?.recordId === `tombstone:${receipt.tombstoneId}`
+      && tombstone.recordType === 'tombstone'
+      && tombstone.payload?.id === receipt.tombstoneId
+      && tombstone.payload?.deletedType === terminal.deletedType
+      && terminal.contentHash === receipt.terminalHash
+      && tombstone.contentHash === receipt.tombstoneHash;
+    if (meta.recoveryMode !== 'NORMAL' || !companionStateValid || !auditRecord || auditRecord.recordType !== 'deletion_audit' || hashCanonical(auditRecord.payload) !== receipt.auditHash || (!watermark && !receiptAnchorProof)) throw new M1bError('ERR_VERIFY_RECEIPT_INVALID');
+    return receipt;
+  }
+
+  private async verifyDeletionUnderQuiescence(deletionId: string, ownerClientId: string, fencingToken: string, now: number, simulateResponseLoss: boolean): Promise<{ verifiedId: string; tombstoneId: string }> {
+    const db = await this.database();
+    const tx = db.transaction([...ROOT_STORES], 'readwrite');
+    const done = transactionDone(tx);
+    try {
+      const systemStore = tx.objectStore('system');
+      const committed = await this.verificationReceiptInTransaction(tx, deletionId);
+      if (committed) {
+        await done;
+        return { verifiedId: committed.verifiedId, tombstoneId: committed.tombstoneId };
+      }
       const journalStore = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
-      if (audit.registryRevision !== this.rootRevision) throw new M1bError('ERR_DELETE_REGISTRY_INCOMPLETE');
       if (!journal || journal.state !== 'FINALIZING' || !journal.finalizing.complete) throw new M1bError('ERR_DELETION_STATE');
+      assertDeletionJournal(journal);
+      const currentLease = await assertLease(tx, ownerClientId, fencingToken, () => this.clock());
+      assertCanonicalHash(currentLease, 'ERR_RECOVERY_LEASE_HASH_INVALID');
+      this.assertQuiescenceStable();
+       const audit = await this.auditRoots(journal, currentLease, tx);
+       this.assertQuiescenceStable();
+      if (audit.outcome === 'CLIENTS_PENDING') throw new M1bError('ERR_PURGE_CLIENTS_PENDING');
+      if (audit.outcome !== 'CLEAN') throw new M1bError('ERR_DELETE_REACHABLE');
+      if (audit.registryRevision !== this.rootCoordinator.revision) throw new M1bError('ERR_DELETE_REGISTRY_INCOMPLETE');
+      if (journal.contentHash !== audit.journalHash || journal.purge.generation !== audit.generation || currentLease.generation !== audit.leaseGeneration || sha256(currentLease.fencingToken) !== audit.leaseFencingTokenHash) throw new M1bError('ERR_DELETION_RECEIPT_STALE');
+      if (this.clock() >= Date.parse(currentLease.expiresAt)) throw new M1bError('ERR_RECOVERY_LEASE_LOST');
       const verifiedId = crypto.randomUUID();
       const tombstoneId = crypto.randomUUID();
+       tx.objectStore('audit').put(toStoredRecord(`audit:${sha256(journal.id)}`, 'deletion_audit', audit));
       const clientRecords = await requestValue<Array<ClientRegistrationRecord | PurgeAckRecord>>(tx.objectStore('system').getAll());
-      for (const client of clientRecords) {
-        if (client.recordType !== 'client_registration' || client.purgeGeneration !== journal.purge.generation) continue;
-        const next = { ...client, state: 'ACTIVE' as const, purgeGeneration: undefined, writtenAt: new Date(now).toISOString() };
-        tx.objectStore('system').put({ ...next, contentHash: hashCanonical(withoutHash(next)) });
-      }
-      journalStore.delete(deletionId);
-      journalStore.add({ id: verifiedId, state: 'VERIFIED', deletedType: journal.targetType, workItemCount: journal.progress.totalCount, createdAt: new Date(now).toISOString(), verifiedAt: new Date(now).toISOString() });
+       const acknowledgedClients = new Set<string>();
+       for (const client of clientRecords) {
+         if (isPurgeAck(client) && client.deletionId === journal.id && client.generation === journal.purge.generation) {
+           assertCanonicalHash(client, 'ERR_PURGE_ACK_HASH_INVALID');
+           acknowledgedClients.add(client.clientId);
+           systemStore.delete(client.recordId);
+         }
+       }
+       for (const client of clientRecords) {
+         if (client.recordType !== 'client_registration' || client.purgeGeneration !== journal.purge.generation) continue;
+         const acknowledged = acknowledgedClients.has(client.clientId);
+         const next = {
+           ...client,
+           state: acknowledged ? 'ACTIVE' as const : 'QUARANTINED' as const,
+           purgeGeneration: acknowledged ? undefined : journal.purge.generation,
+           purgeAckGeneration: acknowledged ? journal.purge.generation : client.purgeAckGeneration,
+           writtenAt: new Date(now).toISOString(),
+         };
+         tx.objectStore('system').put({ ...next, contentHash: hashCanonical(withoutHash(next)) });
+       }
+       journalStore.delete(deletionId);
+      const terminalBase = { id: verifiedId, recordType: 'deletion_terminal' as const, state: 'VERIFIED' as const, deletedType: journal.targetType, workItemCount: journal.progress.totalCount, createdAt: new Date(now).toISOString(), verifiedAt: new Date(now).toISOString() };
+      const terminal: DeletionTerminalRecord = { ...terminalBase, contentHash: hashCanonical(terminalBase) };
+      journalStore.add(terminal);
       tx.objectStore('system').delete('recovery-lease');
-      tx.objectStore('system').add(toStoredRecord(`tombstone:${tombstoneId}`, 'tombstone', { id: tombstoneId, deletedType: journal.targetType, deletedAt: new Date(now).toISOString() }));
+      const tombstone = toStoredRecord(`tombstone:${tombstoneId}`, 'tombstone', { id: tombstoneId, deletedType: journal.targetType, deletedAt: new Date(now).toISOString() });
+      tx.objectStore('system').add(tombstone);
       const metaStore = tx.objectStore('meta');
       const meta = await requestValue<StoreMetaRecord>(metaStore.get('canonical'));
-      metaStore.put({ ...meta, cursor: incrementCursor(meta.cursor), recoveryMode: 'NORMAL', recoveryBytes: 0 });
+      if (!meta || meta.recoveryMode !== 'RECOVERY_ONLY') throw new M1bError('ERR_DELETION_RECEIPT_STALE');
+       assertMetaWatermarks(meta);
+      const nextCursor = incrementCursor(meta.cursor);
+      const watermarkBase = {
+         anchorDigests: [...journal.targetAnchors].sort(),
+        deletionId: journal.id,
+        generation: journal.purge.generation,
+        cursor: nextCursor,
+        journalHash: audit.journalHash,
+        leaseGeneration: currentLease.generation,
+        verifiedAt: new Date(now).toISOString(),
+      };
+      const purgeWatermark = { ...watermarkBase, contentHash: hashCanonical(watermarkBase) };
+      const priorWatermarks = [...(meta.purgeWatermarks ?? []), ...(meta.purgeWatermark && !(meta.purgeWatermarks ?? []).some((item) => item.contentHash === meta.purgeWatermark?.contentHash) ? [meta.purgeWatermark] : [])];
+       const purgeWatermarks = [...priorWatermarks, purgeWatermark].slice(-32);
+       const purgedAnchorDigests = [...new Set([...(meta.purgedAnchorDigests ?? []), ...watermarkBase.anchorDigests])].sort();
+      metaStore.put({ ...meta, cursor: nextCursor, recoveryMode: 'NORMAL', recoveryBytes: 0, purgeWatermark, purgeWatermarks, lastPurgeCursor: nextCursor, purgedAnchorDigests, purgedAnchorIndexHash: hashCanonical(purgedAnchorDigests) });
+      const receiptBase = {
+        recordId: `verification:${sha256(journal.id)}`,
+        recordType: 'deletion_verification_receipt' as const,
+        writtenAt: new Date(now).toISOString(),
+        deletionId: journal.id,
+        generation: journal.purge.generation,
+        verifiedId,
+        tombstoneId,
+        committedAt: new Date(now).toISOString(),
+        registryRevision: audit.registryRevision,
+        auditHash: hashCanonical(audit),
+        journalHash: audit.journalHash,
+        leaseGeneration: currentLease.generation,
+        leaseFencingTokenHash: sha256(currentLease.fencingToken),
+         terminalHash: terminal.contentHash,
+         tombstoneHash: tombstone.contentHash,
+        anchorDigests: watermarkBase.anchorDigests,
+      };
+      const receipt: DeletionVerificationReceiptRecord = { ...receiptBase, contentHash: hashCanonical(receiptBase) };
+      systemStore.add(receipt);
       await done;
+      if (simulateResponseLoss) throw new CommitResponseLostError(nextCursor);
       return { verifiedId, tombstoneId };
     } catch (error) {
       safeAbort(tx);
@@ -903,12 +1382,12 @@ export class IndexedDbM1bAdapter {
   }
 
   async renewRecoveryLease(ownerClientId: string, fencingToken: string, now = Date.now()): Promise<RecoveryLeaseRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction('system', 'readwrite');
+    const tx = this.mutationTransaction(db, 'system', 'readwrite');
     const done = transactionDone(tx);
     try {
-      const lease = await requestValue<RecoveryLeaseRecord | undefined>(tx.objectStore('system').get('recovery-lease'));
-      if (!lease || lease.ownerClientId !== ownerClientId || lease.fencingToken !== fencingToken || Date.parse(lease.expiresAt) <= now) throw new M1bError('ERR_RECOVERY_LEASE_LOST');
+      const lease = await assertLease(tx, ownerClientId, fencingToken, now);
       const base = { ...lease, renewedAt: new Date(now).toISOString(), expiresAt: new Date(now + LEASE_MS).toISOString(), writtenAt: new Date(now).toISOString() };
       const next: RecoveryLeaseRecord = { ...base, contentHash: hashCanonical(withoutHash(base)) };
       tx.objectStore('system').put(next);
@@ -919,16 +1398,19 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async stealRecoveryLease(ownerClientId: string, now = Date.now()): Promise<RecoveryLeaseRecord> {
+    return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = db.transaction('system', 'readwrite');
+    const tx = this.mutationTransaction(db, 'system', 'readwrite');
     const done = transactionDone(tx);
     try {
       const store = tx.objectStore('system');
       const lease = await requestValue<RecoveryLeaseRecord | undefined>(store.get('recovery-lease'));
-      if (!lease || !Number.isFinite(now) || Date.parse(lease.expiresAt) > now) throw new M1bError('ERR_RECOVERY_LEASE_HELD');
+      if (lease) assertCanonicalHash(lease, 'ERR_RECOVERY_LEASE_HASH_INVALID');
+       if (!lease || !Number.isFinite(now) || Date.parse(lease.expiresAt) > now) throw new M1bError('ERR_RECOVERY_LEASE_HELD');
       const next = makeLease(ownerClientId, lease.generation + 1, now);
       store.put(next);
       await done;
@@ -938,16 +1420,19 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    });
   }
 
   async clearAll(options: { simulateBlocked?: boolean; cachesCleared?: boolean } = {}): Promise<ClearAllResult> {
-    const db = await this.database();
+    const releaseQuiescence = await this.acquireRootQuiescence(`clear:${crypto.randomUUID()}`, `clear:${Date.now()}`);
+    try {
+      const db = await this.database();
     const tx = db.transaction('meta', 'readwrite');
     const done = transactionDone(tx);
     const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
     tx.objectStore('meta').put({ ...meta, recoveryMode: 'CLEAR_ONLY' });
     await done;
-    this.previewBuffers.clear();
+    for (const adapter of this.rootCoordinator.adapters) adapter.previewBuffers.clear();
     const cachesCleared = options.cachesCleared === true;
     if (!cachesCleared) {
       return { state: 'BLOCKED', databaseDeleted: false, cachesCleared: false, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
@@ -964,6 +1449,9 @@ export class IndexedDbM1bAdapter {
     const reopened = await this.getMeta();
     const empty = (await this.getAll('business')).length === 0 && reopened.cursor === '0';
     return { state: empty ? 'SUCCEEDED' : 'BLOCKED', databaseDeleted: true, cachesCleared, emptyReopenVerified: empty, ...(empty ? {} : { errorCode: 'ERR_STORAGE_BLOCKED' as const }), coverage: 'single-browser-in-process' };
+      } finally {
+      releaseQuiescence();
+    }
   }
 
   private sweepExpiredPreviewBuffers(now: number): void {
@@ -973,17 +1461,35 @@ export class IndexedDbM1bAdapter {
   }
 
   private async commitInternal(batch: AtomicMutationBatch, options: CommitOptions): Promise<CommitResult> {
-    validateBatch(batch);
-    const db = await this.database();
+    batch = snapshotBatch(batch);
+     if (Boolean(batch.requiresPreview) !== Boolean(options.preview)) throw new M1bError(options.preview ? 'ERR_PREVIEW_BATCH_MISMATCH' : 'ERR_PREVIEW_REQUIRED');
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      const db = await this.database();
     const stores = [...new Set<PhysicalStoreName>(['meta', 'ledger', 'changes', ...batch.storeNames, ...(options.preview ? ['system' as const] : [])])];
-    const tx = db.transaction(stores, 'readwrite');
+    const tx = this.mutationTransaction(db, stores, 'readwrite');
     const done = transactionDone(tx);
     try {
+      if (options.preview) {
+        const systemStore = tx.objectStore('system');
+        const existingPreviewRecords = await requestValue<Array<Partial<PreviewCommitGuardRecord> & { recordId?: string; receiptId?: string; writtenAt?: string }>>(systemStore.getAll());
+        sweepConsumedPreviewRecords(systemStore, existingPreviewRecords, this.clock());
+      }
       const metaStore = tx.objectStore('meta');
       const ledgerStore = tx.objectStore('ledger');
       const prior = await requestValue<CommitLedgerRecord | undefined>(ledgerStore.get(batch.idempotencyKey));
       if (prior) {
         if (prior.batchHash !== batch.batchHash) throw new M1bError('ERR_IDEMPOTENCY_CONFLICT');
+        if (options.preview) {
+          const tokenHash = sha256(options.preview.token);
+          const guard = await requestValue<PreviewCommitGuardRecord | undefined>(tx.objectStore('system').get(`preview-guard:${tokenHash}`));
+          if (!guard) throw new M1bError('ERR_PREVIEW_INVALID');
+          assertCanonicalHash(guard, 'ERR_PREVIEW_INVALID');
+          if (guard.state !== 'CONSUMED' || guard.callerId !== options.preview.callerId || guard.idempotencyKey !== batch.idempotencyKey || guard.batchHash !== batch.batchHash || !guard.receiptId) throw new M1bError('ERR_PREVIEW_RETRY_INVALID');
+          const receipt = await requestValue<PreviewCommitReceipt | undefined>(tx.objectStore('system').get(`preview-receipt:${guard.receiptId}`));
+          if (!receipt) throw new M1bError('ERR_PREVIEW_RETRY_INVALID');
+          assertPreviewReceipt(receipt, guard, batch, prior);
+        }
         await done;
         this.releasePreviewAfterCommit(options.preview);
         return { cursor: prior.committedCursor, applied: false, ledger: prior };
@@ -994,11 +1500,13 @@ export class IndexedDbM1bAdapter {
       if (options.preview) {
         const tokenHash = sha256(options.preview.token);
         guard = await requestValue<PreviewCommitGuardRecord | undefined>(tx.objectStore('system').get(`preview-guard:${tokenHash}`));
+         if (guard) assertCanonicalHash(guard, 'ERR_PREVIEW_INVALID');
         const buffer = this.previewBuffers.get(tokenHash);
         if (!guard) throw new M1bError('ERR_PREVIEW_INVALID');
         if (guard.idempotencyKey !== batch.idempotencyKey || guard.callerId !== options.preview.callerId || guard.privacyEpoch !== meta.privacyEpoch) throw new M1bError('ERR_PREVIEW_STALE');
+         if (guard.batchHash !== batch.batchHash) throw new M1bError('ERR_PREVIEW_BATCH_MISMATCH');
         if (guard.state !== 'READY') throw new M1bError('ERR_PREVIEW_CONSUMED');
-        if (Date.parse(guard.expiresAt) <= Date.parse(options.preview.now)) throw new M1bError('ERR_PREVIEW_EXPIRED');
+        if (Date.parse(guard.expiresAt) <= this.clock()) throw new M1bError('ERR_PREVIEW_EXPIRED');
         if (!buffer) throw new M1bError('ERR_PREVIEW_BUFFER_MISSING');
         if (buffer.bufferHandleHash !== guard.bufferHandleHash || hashBytes(buffer.bytes) !== guard.bufferHandleHash) throw new M1bError('ERR_PREVIEW_STALE');
       }
@@ -1007,6 +1515,8 @@ export class IndexedDbM1bAdapter {
       let byteDelta = 0;
       let changeIndex = 0;
       for (const mutation of batch.mutations) {
+        assertMutationControlBoundary(mutation);
+        assertNoPurgedReference(mutation, meta);
         if (mutation.kind === 'casProjectionHead'
           && (BigInt(mutation.next.sourceCursor) < BigInt(mutation.expectedSourceCursor)
             || BigInt(mutation.next.sourceCursor) > BigInt(meta.cursor))) {
@@ -1041,60 +1551,84 @@ export class IndexedDbM1bAdapter {
       await done.catch(() => undefined);
       throw normalizeIdbError(error);
     }
+    } finally {
+      releaseMutation();
+    }
   }
 
   private releasePreviewAfterCommit(preview: CommitOptions['preview']): void {
     if (preview) this.previewBuffers.delete(sha256(preview.token));
   }
 
-  private async auditRoots(journal: ActiveDeletionJournalRecord): Promise<ReachabilityResult> {
-    const db = await this.database();
-    const tx = db.transaction([...ROOT_STORES], 'readonly');
+  private async auditRoots(journal: ActiveDeletionJournalRecord, lease: RecoveryLeaseRecord, existingTx?: IDBTransaction): Promise<ReachabilityResult> {
+    assertDeletionJournal(journal);
+    assertCanonicalHash(lease, 'ERR_RECOVERY_LEASE_HASH_INVALID');
+    const db = existingTx ? undefined : await this.database();
+    const tx = existingTx ?? db!.transaction([...ROOT_STORES], 'readonly');
     const receipts: { rootId: string; scannedItemCount: number; forbiddenReferenceCount: number }[] = [];
-    const registryBefore = [...this.inProcessRoots.keys()].sort();
-    const registryBeforeRevision = this.rootRevision;
+    const registryBefore = [...this.rootCoordinator.roots.keys()].sort();
+    const registryBeforeRevision = this.rootCoordinator.revision;
+    const purgeAckClientIds = new Set<string>();
     let reachableCount = 0;
     for (const root of ROOT_STORES) {
       const { keys, values } = await entries(tx.objectStore(root));
       let forbiddenReferenceCount = 0;
       values.forEach((value, index) => {
+        if (root === 'system' && value && typeof value === 'object' && isPurgeAck(value as StoredRecord | PurgeAckRecord) && (value as PurgeAckRecord).deletionId === journal.id && (value as PurgeAckRecord).generation === journal.purge.generation) {
+          const ack = value as PurgeAckRecord;
+          assertCanonicalHash(ack, 'ERR_PURGE_ACK_HASH_INVALID');
+          purgeAckClientIds.add(ack.clientId);
+        }
         if (isOwnDeletionControl(root, keys[index], value, journal)) return;
         if (matchesDeletionTarget(value, journal)) forbiddenReferenceCount += 1;
       });
       receipts.push({ rootId: `idb.${root}`, scannedItemCount: values.length, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
     }
-    await transactionDone(tx);
-    for (const root of [...this.inProcessRoots.values()].sort((a, b) => a.rootId.localeCompare(b.rootId))) {
+    if (!existingTx) await transactionDone(tx);
+    for (const root of [...this.rootCoordinator.roots.values()].sort((a, b) => a.rootId.localeCompare(b.rootId))) {
       const values = root.read();
+      if (!Array.isArray(values)) throw new M1bError('ERR_ROOT_READER_ASYNC');
       const forbiddenReferenceCount = values.filter((value) => matchesDeletionTarget(value, journal)).length;
       receipts.push({ rootId: root.rootId, scannedItemCount: values.length, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
     }
-    const registryAfter = [...this.inProcessRoots.keys()].sort();
-    const registryComplete = registryBeforeRevision === this.rootRevision && registryBefore.length === registryAfter.length && registryBefore.every((rootId, index) => rootId === registryAfter[index]);
+    for (const adapter of [...this.rootCoordinator.adapters].sort((left, right) => left.adapterId.localeCompare(right.adapterId))) {
+      for (const [tokenHash, buffer] of adapter.previewBuffers) {
+        const source = new TextDecoder().decode(buffer.bytes);
+        const forbiddenReferenceCount = containsDeletionAnchorDigest(source, journal) ? 1 : 0;
+        receipts.push({ rootId: `adapter.${adapter.adapterId}.preview.${tokenHash}`, scannedItemCount: 1, forbiddenReferenceCount });
+        reachableCount += forbiddenReferenceCount;
+      }
+    }
+    const registryAfter = [...this.rootCoordinator.roots.keys()].sort();
+    const registryComplete = registryBeforeRevision === this.rootCoordinator.revision && registryBefore.length === registryAfter.length && registryBefore.every((rootId, index) => rootId === registryAfter[index]);
     return {
       deletionId: journal.id,
       generation: journal.purge.generation,
-      receipts,
+      journalHash: journal.contentHash,
+       leaseGeneration: lease.generation,
+       leaseFencingTokenHash: sha256(lease.fencingToken),
+       receipts,
       reachableCount,
-      allRequiredClientsPurged: true,
+      allRequiredClientsPurged: journal.purge.requiredClientIds.every((clientId) => purgeAckClientIds.has(clientId)),
       registryComplete,
        registryRevision: registryBeforeRevision,
-      outcome: !registryComplete ? 'REGISTRY_INCOMPLETE' : reachableCount === 0 ? 'CLEAN' : 'REACHABLE',
+      outcome: !journal.purge.requiredClientIds.every((clientId) => purgeAckClientIds.has(clientId)) ? 'CLIENTS_PENDING' : !registryComplete ? 'REGISTRY_INCOMPLETE' : reachableCount === 0 ? 'CLEAN' : 'REACHABLE',
       coverage: 'single-browser-in-process',
     };
   }
 
   private async updateJournalState(deletionId: string, ownerClientId: string, fencingToken: string, expected: ActiveDeletionJournalRecord['state'], nextState: ActiveDeletionJournalRecord['state'], now: number): Promise<void> {
     const db = await this.database();
-    const tx = db.transaction(['meta', 'journal', 'system'], 'readwrite');
+    const tx = this.mutationTransaction(db, ['meta', 'journal', 'system'], 'readwrite');
     const done = transactionDone(tx);
     try {
       await assertLease(tx, ownerClientId, fencingToken, now);
       const store = tx.objectStore('journal');
       const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(store.get(deletionId));
       if (!journal || journal.state !== expected) throw new M1bError('ERR_DELETION_STATE');
+       assertDeletionJournal(journal);
       store.put(updateJournalHash({ ...journal, state: nextState, updatedAt: new Date(now).toISOString() }));
       await bumpRecoveryCursor(tx);
       await done;
@@ -1105,7 +1639,30 @@ export class IndexedDbM1bAdapter {
     }
   }
 
+  private async withRootMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      return await operation();
+    } finally {
+      releaseMutation();
+    }
+  }
+
+  private mutationTransaction(db: IDBDatabase, stores: PhysicalStoreName | readonly PhysicalStoreName[], mode: 'readwrite'): IDBTransaction {
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      const tx = db.transaction(stores, mode);
+      const done = transactionDone(tx);
+      void done.then(releaseMutation, releaseMutation);
+      return tx;
+    } catch (error) {
+      releaseMutation();
+      throw error;
+    }
+  }
+
   private async database(): Promise<IDBDatabase> {
+    if (this.disposed) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
     await this.open();
     if (!this.db) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
     return this.db;
@@ -1114,7 +1671,7 @@ export class IndexedDbM1bAdapter {
 
 export function makeBatch(input: Omit<AtomicMutationBatch, 'batchHash'>): AtomicMutationBatch {
   const normalized = { ...input, storeNames: [...input.storeNames].sort() };
-  return { ...normalized, batchHash: hashCanonical({ expectedCursor: normalized.expectedCursor, expectedPrivacyEpoch: normalized.expectedPrivacyEpoch, storeNames: normalized.storeNames, mutations: normalized.mutations }) };
+  return { ...normalized, batchHash: hashCanonical({ expectedCursor: normalized.expectedCursor, expectedPrivacyEpoch: normalized.expectedPrivacyEpoch, requiresActiveObservation: normalized.requiresActiveObservation === true, requiresPreview: normalized.requiresPreview === true, storeNames: normalized.storeNames, mutations: normalized.mutations }) };
 }
 
 export function toStoredRecord<T>(recordId: string, recordType: string, payload: T, writtenAt = new Date().toISOString()): StoredRecord<T> {
@@ -1126,14 +1683,90 @@ function immutablePayloadHash(record: StoredRecord): Hash {
   return hashCanonical({ recordType: record.recordType, payload: record.payload });
 }
 
+function snapshotBatch(batch: AtomicMutationBatch): AtomicMutationBatch {
+  try {
+    const snapshot = structuredClone(batch) as AtomicMutationBatch;
+    validateBatch(snapshot);
+    return snapshot;
+  } catch (error) {
+    if (error instanceof M1bError) throw error;
+    throw new M1bError('ERR_BATCH_INVALID');
+  }
+}
+
+function assertProjectionHead(head: ProjectionHeadRecord, code: string): void {
+  if (!head || typeof head.projectionId !== 'string' || typeof head.sourceCursor !== 'string' || !/^\d+$/.test(head.sourceCursor)
+    || !Number.isSafeInteger(head.revision) || head.revision < 0 || !/^sha256:[0-9a-f]{64}$/.test(head.projectionHash)) throw new M1bError(code);
+}
+
 function validateBatch(batch: AtomicMutationBatch): void {
   if (batch.mutations.length > 500) throw new M1bError('ERR_BATCH_LIMIT');
   const actualStores = [...new Set(batch.mutations.map((mutation) => mutation.storeName))].sort();
   const declaredStores = [...batch.storeNames];
   if (declaredStores.join('|') !== [...new Set(declaredStores)].sort().join('|') || actualStores.join('|') !== declaredStores.join('|')) throw new M1bError('ERR_STORE_SET_MISMATCH');
-  const expectedHash = hashCanonical({ expectedCursor: batch.expectedCursor, expectedPrivacyEpoch: batch.expectedPrivacyEpoch, storeNames: batch.storeNames, mutations: batch.mutations });
+  for (const mutation of batch.mutations) {
+    if (mutation.kind === 'insertImmutable' || mutation.kind === 'casSingleton') assertCanonicalHash(mutation.record, 'ERR_RECORD_HASH_INVALID');
+    if (mutation.kind === 'deleteIfHash' && !/^sha256:[0-9a-f]{64}$/.test(mutation.expectedContentHash)) throw new M1bError('ERR_RECORD_HASH_INVALID');
+    if (mutation.kind === 'casProjectionHead') assertProjectionHead(mutation.next, 'ERR_PROJECTION_HASH_INVALID');
+  }
+  const expectedHash = hashCanonical({ expectedCursor: batch.expectedCursor, expectedPrivacyEpoch: batch.expectedPrivacyEpoch, requiresActiveObservation: batch.requiresActiveObservation === true, requiresPreview: batch.requiresPreview === true, storeNames: batch.storeNames, mutations: batch.mutations });
   if (batch.batchHash !== expectedHash) throw new M1bError('ERR_BATCH_HASH_MISMATCH');
   if (estimateBytes(batch.mutations) > 4 * 1024 * 1024) throw new M1bError('ERR_BATCH_LIMIT');
+}
+
+function assertMutationControlBoundary(mutation: CanonicalMutation): void {
+  if (mutation.storeName !== 'system') return;
+  const recordType = mutation.kind === 'deleteIfHash' ? '' : mutation.record.recordType;
+  const recordId = mutation.kind === 'deleteIfHash' ? mutation.recordId : mutation.record.recordId;
+  const reservedTypes = new Set(['client_registration', 'recovery_lease', 'purge_ack', 'preview_commit_guard', 'observation_commit_receipt', 'deletion_verification_receipt', 'tombstone', 'import_session', 'import_staging']);
+  const reservedPrefixes = ['client:', 'recovery-lease', 'purge-ack:', 'preview-guard:', 'preview-receipt:', 'verification:', 'tombstone:', 'import-session:', 'import-stage:'];
+  if (reservedTypes.has(recordType) || reservedPrefixes.some((prefix) => recordId.startsWith(prefix))) throw new M1bError('ERR_RESERVED_CONTROL_KEY');
+}
+
+function assertNoPurgedReference(mutation: CanonicalMutation, meta: StoreMetaRecord): void {
+  const values: string[] = [];
+  const collect = (value: unknown, depth = 0): void => {
+    if (depth > 256) throw new M1bError('ERR_MUTATION_DEPTH');
+    if (value === null || value === undefined) return;
+    if (typeof value === 'string') { values.push(value); return; }
+    if (Array.isArray(value)) { value.forEach((item) => collect(item, depth + 1)); return; }
+    if (typeof value === 'object') Object.values(value).forEach((item) => collect(item, depth + 1));
+  };
+  if (mutation.kind === 'deleteIfHash') collect({ recordId: mutation.recordId, expectedContentHash: mutation.expectedContentHash });
+  else if (mutation.kind === 'casProjectionHead') collect(mutation.next);
+  else collect(mutation.record);
+  assertNoPurgedValues(values, meta);
+}
+
+function assertNoPurgedPreviewReference(bytes: Uint8Array, meta: StoreMetaRecord): void {
+  const text = new TextDecoder().decode(bytes);
+  const values: string[] = [text];
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const collect = (value: unknown, depth = 0): void => {
+      if (depth > 256) throw new M1bError('ERR_MUTATION_DEPTH');
+      if (value === null || value === undefined) return;
+      if (typeof value === 'string') { values.push(value); return; }
+      if (Array.isArray(value)) { value.forEach((item) => collect(item, depth + 1)); return; }
+      if (typeof value === 'object') Object.values(value).forEach((item) => collect(item, depth + 1));
+    };
+    collect(parsed);
+  } catch (error) {
+    if (error instanceof M1bError) throw error;
+  }
+  assertNoPurgedValues(values, meta);
+}
+
+function assertNoPurgedValues(values: readonly string[], meta: StoreMetaRecord): void {
+  const watermarks = [...(meta.purgeWatermarks ?? []), ...(meta.purgeWatermark ? [meta.purgeWatermark] : [])];
+  const permanentDigests = new Set(meta.purgedAnchorDigests ?? []);
+  const legacyGenerations = new Set(watermarks.map((watermark) => watermark.generation));
+  for (const watermark of watermarks) {
+    for (const digest of watermark.anchorDigests ?? []) permanentDigests.add(digest);
+  }
+  if (values.some((value) => permanentDigests.has(sha256(value)) || [...legacyGenerations].some((generation) => permanentDigests.has(sha256(`${generation}:${value}`))))) {
+    throw new M1bError('ERR_PURGED_REFERENCE');
+  }
 }
 
 async function applyMutation(tx: IDBTransaction, mutation: CanonicalMutation): Promise<{ byteDelta: number; affected?: { recordType: string; recordId: string }; change: { recordType: string; recordId: string; change: 'put' | 'delete'; contentHash?: Hash } }> {
@@ -1153,6 +1786,7 @@ async function applyMutation(tx: IDBTransaction, mutation: CanonicalMutation): P
   }
   if (mutation.kind === 'casSingleton') {
     const current = await requestValue<StoredRecord | undefined>(store.get(mutation.record.recordId));
+    if (current) assertCanonicalHash(current, 'ERR_RECORD_HASH_INVALID');
     const currentHash = current?.contentHash ?? null;
     if (currentHash !== mutation.expectedContentHash) throw new M1bError('ERR_REVISION_CONFLICT');
     store.put(mutation.record);
@@ -1160,6 +1794,7 @@ async function applyMutation(tx: IDBTransaction, mutation: CanonicalMutation): P
   }
   if (mutation.kind === 'deleteIfHash') {
     const current = await requestValue<StoredRecord | ProjectionHeadRecord | undefined>(store.get(mutation.recordId));
+    if (current && 'contentHash' in current) assertCanonicalHash(current, 'ERR_RECORD_HASH_INVALID');
     if (!current) return { byteDelta: 0, change: { recordType: 'unknown', recordId: mutation.recordId, change: 'delete' } };
     const currentHash = recordHash(current);
     if (currentHash !== mutation.expectedContentHash) throw new M1bError('ERR_HASH_MISMATCH');
@@ -1168,21 +1803,27 @@ async function applyMutation(tx: IDBTransaction, mutation: CanonicalMutation): P
     return { byteDelta: -estimateBytes(current), affected: { recordType, recordId: mutation.recordId }, change: { recordType, recordId: mutation.recordId, change: 'delete' } };
   }
   const current = await requestValue<ProjectionHeadRecord | undefined>(store.get(mutation.next.projectionId));
+  if (current) assertProjectionHead(current, 'ERR_PROJECTION_HASH_INVALID');
   if ((current?.sourceCursor ?? '0') !== mutation.expectedSourceCursor) throw new M1bError('ERR_PROJECTION_STALE');
   store.put(mutation.next);
   return { byteDelta: estimateBytes(mutation.next) - estimateBytes(current), affected: { recordType: 'projection_head', recordId: mutation.next.projectionId }, change: { recordType: 'projection_head', recordId: mutation.next.projectionId, change: 'put', contentHash: mutation.next.projectionHash } };
 }
 
-async function assertLease(tx: IDBTransaction, ownerClientId: string, fencingToken: string, now: number): Promise<RecoveryLeaseRecord> {
-  if (!Number.isFinite(now)) throw new M1bError('ERR_CLOCK_UNAVAILABLE');
+async function assertLease(tx: IDBTransaction, ownerClientId: string, fencingToken: string, now: number | (() => number)): Promise<RecoveryLeaseRecord> {
   const lease = await requestValue<RecoveryLeaseRecord | undefined>(tx.objectStore('system').get('recovery-lease'));
-  if (!lease || lease.ownerClientId !== ownerClientId || lease.fencingToken !== fencingToken || Date.parse(lease.expiresAt) <= now) throw new M1bError('ERR_RECOVERY_LEASE_LOST');
+  const currentNow = typeof now === 'function' ? now() : now;
+  if (!Number.isFinite(currentNow)) throw new M1bError('ERR_CLOCK_UNAVAILABLE');
+  if (!lease || lease.ownerClientId !== ownerClientId || lease.fencingToken !== fencingToken || Date.parse(lease.expiresAt) <= currentNow) throw new M1bError('ERR_RECOVERY_LEASE_LOST');
+  assertCanonicalHash(lease, 'ERR_RECOVERY_LEASE_HASH_INVALID');
+  if (lease.recordId !== 'recovery-lease' || lease.recordType !== 'recovery_lease' || !Number.isSafeInteger(lease.generation)) throw new M1bError('ERR_RECOVERY_LEASE_HASH_INVALID');
   return lease;
 }
 
 async function bumpRecoveryCursor(tx: IDBTransaction, reclaimedBytes = 0, recoveryDelta = 0): Promise<void> {
   const store = tx.objectStore('meta');
   const meta = await requestValue<StoreMetaRecord>(store.get('canonical'));
+  if (!meta) throw new M1bError('ERR_STORAGE_CORRUPT');
+  assertMetaWatermarks(meta);
   const recoveryBytes = meta.recoveryBytes + recoveryDelta;
   if (recoveryBytes < 0 || recoveryBytes > RECOVERY_RESERVE) throw new M1bError('ERR_RECOVERY_RESERVE_EXHAUSTED');
   store.put({ ...meta, cursor: incrementCursor(meta.cursor), logicalBytes: Math.max(0, meta.logicalBytes - reclaimedBytes), recoveryBytes });
@@ -1208,6 +1849,181 @@ function updateJournalHash(journal: ActiveDeletionJournalRecord): ActiveDeletion
   return { ...journal, contentHash: hashCanonical(withoutHash(journal)) };
 }
 
+function assertCanonicalHash<T extends { contentHash: Hash }>(record: T, code: string): void {
+  if (hashCanonical(withoutHash(record)) !== record.contentHash) throw new M1bError(code);
+}
+
+function assertPreviewReceipt(receipt: PreviewCommitReceipt, guard: PreviewCommitGuardRecord, batch: AtomicMutationBatch, ledger: CommitLedgerRecord): void {
+  assertCanonicalHash(receipt, 'ERR_PREVIEW_RETRY_INVALID');
+  if (receipt.recordType !== 'observation_commit_receipt' || receipt.guardId !== guard.recordId || receipt.idempotencyKey !== batch.idempotencyKey || receipt.batchHash !== batch.batchHash || receipt.cursor !== ledger.committedCursor) throw new M1bError('ERR_PREVIEW_RETRY_INVALID');
+}
+
+function assertVerificationReceipt(receipt: DeletionVerificationReceiptRecord, deletionId: string): void {
+  assertCanonicalHash(receipt, 'ERR_VERIFY_RECEIPT_INVALID');
+  const hashFields = [receipt.auditHash, receipt.journalHash, receipt.leaseFencingTokenHash, receipt.terminalHash, receipt.tombstoneHash];
+  if (receipt.recordId !== `verification:${sha256(deletionId)}` || receipt.recordType !== 'deletion_verification_receipt' || receipt.deletionId !== deletionId || !receipt.generation || !receipt.verifiedId || !receipt.tombstoneId || !Number.isSafeInteger(receipt.registryRevision) || !Number.isSafeInteger(receipt.leaseGeneration) || hashFields.some((value) => !/^sha256:[0-9a-f]{64}$/.test(value)) || (receipt.anchorDigests !== undefined && receipt.anchorDigests.some((value: unknown) => !/^sha256:[0-9a-f]{64}$/.test(String(value))))) throw new M1bError('ERR_VERIFY_RECEIPT_INVALID');
+}
+
+function assertDeletionJournal(journal: ActiveDeletionJournalRecord): void {
+  assertCanonicalHash(journal, 'ERR_JOURNAL_HASH_INVALID');
+  if (!Array.isArray(journal.targetAnchors) || journal.targetAnchors.some((anchor: unknown) => typeof anchor !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(anchor))) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
+}
+
+function assertJournalCollection(records: readonly ActiveDeletionJournalRecord[]): void {
+  records.filter((record) => record.recordType === 'active_deletion_journal').forEach((record) => assertDeletionJournal(record));
+}
+
+function assertStoredRecordCollection(records: readonly StoredRecord[], code: string): void {
+  records.forEach((record) => assertCanonicalHash(record, code));
+}
+
+function assertClientRegistration(record: ClientRegistrationRecord): void {
+  assertCanonicalHash(record, 'ERR_CLIENT_HASH_INVALID');
+  if (record.recordId !== `client:${record.clientId}` || record.recordType !== 'client_registration') throw new M1bError('ERR_CLIENT_HASH_INVALID');
+}
+
+function migrateLegacyMeta(tx: IDBTransaction): void {
+  const store = tx.objectStore('meta');
+  const request = store.get('canonical');
+  request.onsuccess = () => {
+    try {
+      const legacy = request.result as Partial<StoreMetaRecord> | undefined;
+      if (!legacy || legacy.key !== 'canonical') throw new M1bError('ERR_STORAGE_CORRUPT');
+      const rawWatermarks = legacy.purgeWatermarks;
+      if (rawWatermarks !== undefined && !Array.isArray(rawWatermarks)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+      const raw = [...(rawWatermarks ?? []), ...(legacy.purgeWatermark ? [legacy.purgeWatermark] : [])];
+      const normalized: PurgeWatermark[] = raw.map((value) => migrateLegacyWatermark(value));
+      const deduped = normalized.filter((watermark, index) => normalized.findIndex((candidate) => candidate.contentHash === watermark.contentHash) === index);
+      const latest = deduped.at(-1);
+      const anchorDigests = [...new Set(deduped.flatMap((watermark) => watermark.anchorDigests ?? []))].sort() as Hash[];
+      const existingDigests = legacy.purgedAnchorDigests;
+      if (existingDigests !== undefined && (!Array.isArray(existingDigests) || existingDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+      const allDigests = [...new Set([...(existingDigests ?? []), ...anchorDigests])].sort() as Hash[];
+      const migrated: StoreMetaRecord = {
+        ...(legacy as StoreMetaRecord),
+        purgedAnchorDigests: allDigests,
+        purgedAnchorIndexHash: hashCanonical(allDigests),
+        ...(deduped.length && latest ? { purgeWatermarks: deduped, purgeWatermark: latest, lastPurgeCursor: latest.cursor } : {}),
+      };
+      store.put(migrated);
+      migrateLegacyDeletionControls(tx);
+    } catch (error) {
+      tx.abort();
+      throw error;
+    }
+  };
+}
+
+function migrateLegacyDeletionControls(tx: IDBTransaction): void {
+  const systemRequest = tx.objectStore('system').getAll();
+  const journalRequest = tx.objectStore('journal').getAll();
+  let systemRecords: unknown[] | undefined;
+  let journalRecords: unknown[] | undefined;
+  const fail = () => { try { tx.abort(); } catch { /* versionchange transaction already aborting */ } };
+  const finish = () => {
+    if (!systemRecords || !journalRecords) return;
+    try {
+      const journals = journalRecords.map((value) => {
+        if (!value || typeof value !== 'object') return value;
+        const candidate = value as Record<string, unknown>;
+        if (candidate.recordType !== 'active_deletion_journal') return value;
+        assertCanonicalHash(value as { contentHash: Hash }, 'ERR_JOURNAL_HASH_INVALID');
+        const anchors = candidate.targetAnchors;
+        if (!Array.isArray(anchors) || anchors.some((anchor) => typeof anchor !== 'string')) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
+        const digests = anchors.every((anchor) => /^sha256:[0-9a-f]{64}$/.test(anchor)) ? anchors as Hash[] : anchors.map((anchor) => sha256(anchor));
+        const next = { ...candidate, targetAnchors: [...new Set(digests)].sort() };
+        const hashable = { ...next } as Record<string, unknown>;
+        delete hashable.contentHash;
+        const hashed = { ...next, contentHash: hashCanonical(hashable) };
+        tx.objectStore('journal').put(hashed);
+        return hashed;
+      });
+      const normalizedSystem = systemRecords.map((value) => {
+        if (!value || typeof value !== 'object') return value;
+        const candidate = value as Record<string, unknown>;
+        if (candidate.recordType === 'deletion_plan') {
+          assertCanonicalHash(value as { contentHash: Hash }, 'ERR_DELETION_PLAN_HASH_INVALID');
+          const target = candidate.target;
+          if (!target || typeof target !== 'object' || Array.isArray(target)) throw new M1bError('ERR_DELETION_PLAN_HASH_INVALID');
+          const targetRecord = target as Record<string, unknown>;
+          const legacyAnchors = targetRecord.lineageAnchors;
+          if (legacyAnchors !== undefined && (!Array.isArray(legacyAnchors) || legacyAnchors.some((anchor) => typeof anchor !== 'string'))) throw new M1bError('ERR_DELETION_PLAN_HASH_INVALID');
+          const existing = targetRecord.lineageAnchorDigests;
+          if (existing !== undefined && (!Array.isArray(existing) || existing.some((anchor) => typeof anchor !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(anchor)))) throw new M1bError('ERR_DELETION_PLAN_HASH_INVALID');
+          const legacyAnchorList = (legacyAnchors ?? []) as string[];
+          const existingAnchorList = (existing ?? []) as string[];
+          const nextTarget: Record<string, unknown> = { ...targetRecord, lineageAnchorDigests: [...new Set([...existingAnchorList, ...legacyAnchorList.map((anchor) => sha256(anchor))])].sort() };
+          delete nextTarget.lineageAnchors;
+          const nextBase: Record<string, unknown> = { ...candidate, target: nextTarget };
+          const planHash = hashCanonical({
+            recordId: nextBase.recordId,
+            recordType: nextBase.recordType,
+            writtenAt: nextBase.writtenAt,
+            target: nextBase.target,
+            cause: nextBase.cause,
+            baseCursor: nextBase.baseCursor,
+            basePrivacyEpoch: nextBase.basePrivacyEpoch,
+            baseSnapshotHash: nextBase.baseSnapshotHash,
+            closureRulesHash: nextBase.closureRulesHash,
+          });
+          const next = { ...nextBase, planHash, contentHash: hashCanonical({ ...nextBase, planHash }) };
+          tx.objectStore('system').put(next);
+          return next;
+        }
+        if (candidate.state === 'VERIFIED' && typeof candidate.id === 'string' && candidate.recordType === undefined) {
+          const base = { ...candidate, recordType: 'deletion_terminal' as const };
+          const next = { ...base, contentHash: hashCanonical(base) };
+          tx.objectStore('journal').put(next);
+          return next;
+        }
+        return value;
+      });
+      const terminalById = new Map(journals.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && (value as Record<string, unknown>).recordType === 'deletion_terminal')).map((value) => [String(value.id), value]));
+      const tombstoneById = new Map(normalizedSystem.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && (value as Record<string, unknown>).recordType === 'tombstone' && typeof (value as Record<string, unknown>).recordId === 'string')).map((value) => [String(value.recordId), value]));
+      for (const value of normalizedSystem) {
+        if (!value || typeof value !== 'object' || (value as Record<string, unknown>).recordType !== 'deletion_verification_receipt') continue;
+        const candidate = value as Record<string, unknown>;
+        if (candidate.terminalHash !== undefined && candidate.tombstoneHash !== undefined) continue;
+        assertCanonicalHash(value as { contentHash: Hash }, 'ERR_VERIFY_RECEIPT_INVALID');
+        const terminal = terminalById.get(String(candidate.verifiedId));
+        const tombstone = tombstoneById.get(`tombstone:${String(candidate.tombstoneId)}`);
+        if (!terminal || !tombstone || typeof terminal.contentHash !== 'string' || typeof tombstone.contentHash !== 'string') throw new M1bError('ERR_VERIFY_RECEIPT_INVALID');
+        const nextBase = { ...candidate, terminalHash: terminal.contentHash, tombstoneHash: tombstone.contentHash };
+        tx.objectStore('system').put({ ...nextBase, contentHash: hashCanonical(nextBase) });
+      }
+    } catch {
+      fail();
+    }
+  };
+  systemRequest.onsuccess = () => { systemRecords = systemRequest.result as unknown[]; finish(); };
+  journalRequest.onsuccess = () => { journalRecords = journalRequest.result as unknown[]; finish(); };
+  systemRequest.onerror = fail;
+  journalRequest.onerror = fail;
+}
+
+function migrateLegacyWatermark(value: unknown): PurgeWatermark {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const watermark = value as Record<string, unknown>;
+  if (typeof watermark.contentHash !== 'string' || typeof watermark.deletionId !== 'string' || typeof watermark.generation !== 'string'
+    || typeof watermark.cursor !== 'string' || !/^\d+$/.test(watermark.cursor) || typeof watermark.journalHash !== 'string'
+    || typeof watermark.leaseGeneration !== 'number' || !Number.isSafeInteger(watermark.leaseGeneration) || typeof watermark.verifiedAt !== 'string') {
+    throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  }
+  assertCanonicalHash(value as { contentHash: Hash }, 'ERR_PURGE_WATERMARK_INVALID');
+  const anchorDigests = watermark.anchorDigests;
+  if (anchorDigests !== undefined && (!Array.isArray(anchorDigests) || anchorDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const base: Omit<PurgeWatermark, 'contentHash'> = {
+    deletionId: watermark.deletionId,
+    generation: watermark.generation,
+    cursor: watermark.cursor,
+    anchorDigests: [...(anchorDigests ?? [])].sort() as Hash[],
+    journalHash: watermark.journalHash as Hash,
+    leaseGeneration: watermark.leaseGeneration,
+    verifiedAt: watermark.verifiedAt,
+  };
+  return { ...base, contentHash: hashCanonical(base) };
+}
+
 function initialMeta(): StoreMetaRecord {
   return {
     key: 'canonical',
@@ -1220,11 +2036,33 @@ function initialMeta(): StoreMetaRecord {
     recoveryBytes: 0,
     recoveryReserveBytes: 5242880,
     sizeEstimatorVersion: 'storage-size-v1',
+    incarnation: crypto.randomUUID(),
+    purgedAnchorDigests: [],
+    purgedAnchorIndexHash: hashCanonical([]),
   };
+}
+
+function assertMetaWatermarks(meta: StoreMetaRecord): void {
+  if (meta.lastPurgeCursor !== undefined && !/^\d+$/.test(meta.lastPurgeCursor)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  if (!Array.isArray(meta.purgedAnchorDigests) || !/^sha256:[0-9a-f]{64}$/.test(meta.purgedAnchorIndexHash)
+    || hashCanonical(meta.purgedAnchorDigests) !== meta.purgedAnchorIndexHash
+    || meta.purgedAnchorDigests.some((digest) => !/^sha256:[0-9a-f]{64}$/.test(digest))
+    || [...new Set(meta.purgedAnchorDigests)].length !== meta.purgedAnchorDigests.length
+    || meta.purgedAnchorDigests.some((digest, index) => index > 0 && meta.purgedAnchorDigests[index - 1]! > digest)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  if (meta.purgeWatermarks !== undefined && !Array.isArray(meta.purgeWatermarks)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const permanent = new Set(meta.purgedAnchorDigests);
+  const watermarks = [...(meta.purgeWatermarks ?? []), ...(meta.purgeWatermark ? [meta.purgeWatermark] : [])];
+  for (const watermark of watermarks) {
+    assertCanonicalHash(watermark, 'ERR_PURGE_WATERMARK_INVALID');
+    const anchorDigests: unknown = watermark.anchorDigests;
+    if (!Array.isArray(anchorDigests) || anchorDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest) || !permanent.has(digest))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+    if (!/^sha256:[0-9a-f]{64}$/.test(watermark.journalHash)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  }
 }
 
 function assertMeta(meta: StoreMetaRecord | undefined, cursor: Cursor, epoch: number, requireActive: boolean): asserts meta is StoreMetaRecord {
   if (!meta) throw new M1bError('ERR_STORAGE_CORRUPT');
+  assertMetaWatermarks(meta);
   if (meta.privacyEpoch !== epoch) throw new M1bError('ERR_PRIVACY_EPOCH_STALE');
   if (meta.cursor !== cursor) throw new M1bError('ERR_CURSOR_CONFLICT');
   if (meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_RECOVERY_REQUIRED');
@@ -1252,8 +2090,8 @@ function isOwnDeletionControl(store: PhysicalStoreName, key: IDBValidKey | undef
   return false;
 }
 
-function isPurgeAck(value: StoredRecord | PurgeAckRecord): value is PurgeAckRecord {
-  return value.recordType === 'purge_ack' && 'deletionId' in value;
+function isPurgeAck(value: unknown): value is PurgeAckRecord {
+  return !!value && typeof value === 'object' && 'recordType' in value && (value as { recordType?: unknown }).recordType === 'purge_ack' && 'deletionId' in value;
 }
 
 function recordHash(value: unknown): Hash | undefined {
@@ -1265,7 +2103,20 @@ function recordHash(value: unknown): Hash | undefined {
 }
 
 function matchesDeletionTarget(value: unknown, journal: ActiveDeletionJournalRecord): boolean {
-  return (journal.targetAnchors ?? [journal.targetId, journal.targetHash]).some((anchor) => deepContains(value, anchor));
+  const anchors = new Set(journal.targetAnchors);
+  if (anchors.size === 0) return false;
+  const collect = (candidate: unknown, depth = 0): boolean => {
+    if (depth > 256) throw new M1bError('ERR_MUTATION_DEPTH');
+    if (typeof candidate === 'string') return anchors.has(sha256(candidate));
+    if (Array.isArray(candidate)) return candidate.some((item) => collect(item, depth + 1));
+    if (candidate && typeof candidate === 'object') return Object.values(candidate as Record<string, unknown>).some((item) => collect(item, depth + 1));
+    return false;
+  };
+  return collect(value);
+}
+
+function containsDeletionAnchorDigest(text: string, journal: ActiveDeletionJournalRecord): boolean {
+  return matchesDeletionTarget(text, journal);
 }
 
 function deepContains(value: unknown, needle: string): boolean {
@@ -1305,9 +2156,8 @@ function requestValue<T>(request: IDBRequest<T>): Promise<T> {
 
 function transactionDone(transaction: IDBTransaction): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(transaction.error ?? new M1bError('ERR_STORAGE_ABORT'));
-    transaction.onerror = () => undefined;
+    transaction.addEventListener('complete', () => resolve(), { once: true });
+    transaction.addEventListener('abort', () => reject(transaction.error ?? new M1bError('ERR_STORAGE_ABORT')), { once: true });
   });
 }
 

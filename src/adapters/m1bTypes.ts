@@ -23,6 +23,17 @@ export const STORE_NAMES: readonly StoreName[] = [
   'changes',
 ];
 
+export interface PurgeWatermark {
+  readonly deletionId: string;
+  readonly generation: string;
+  readonly cursor: Cursor;
+  readonly anchorDigests?: readonly Hash[];
+  readonly journalHash: Hash;
+  readonly leaseGeneration: number;
+  readonly verifiedAt: string;
+  readonly contentHash: Hash;
+}
+
 export interface StoreMetaRecord {
   key: 'canonical';
   cursor: Cursor;
@@ -34,6 +45,12 @@ export interface StoreMetaRecord {
   recoveryBytes: number;
   recoveryReserveBytes: 5242880;
   sizeEstimatorVersion: 'storage-size-v1';
+  incarnation?: string;
+  purgeWatermark?: PurgeWatermark;
+  lastPurgeCursor?: Cursor;
+  purgeWatermarks?: readonly PurgeWatermark[];
+  purgedAnchorDigests: readonly Hash[];
+  purgedAnchorIndexHash: Hash;
 }
 
 export interface StoredRecord<T = unknown> {
@@ -66,6 +83,7 @@ export interface AtomicMutationBatch {
   mutations: readonly CanonicalMutation[];
   batchHash: Hash;
   requiresActiveObservation?: boolean;
+  requiresPreview?: boolean;
 }
 
 export interface ChangeRecord {
@@ -103,6 +121,7 @@ export interface PreviewCommitGuardRecord {
   expiresAt: string;
   state: 'READY' | 'CONSUMED';
   idempotencyKey: string;
+  batchHash?: Hash;
   receiptId?: string;
   contentHash: Hash;
 }
@@ -136,7 +155,7 @@ export interface DeletionPlanRecord {
   recordId: string;
   recordType: 'deletion_plan';
   writtenAt: string;
-  target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchors?: readonly string[] };
+  target: { storeName: StoreName; recordId: string; contentHash: Hash; recordType: string; lineageAnchorDigests?: readonly Hash[] };
   cause: 'user-delete' | 'consent-revoked' | 'retention-expired' | 'clear-all';
   baseCursor: Cursor;
   basePrivacyEpoch: number;
@@ -165,7 +184,7 @@ export interface ActiveDeletionJournalRecord {
   targetId: string;
   targetHash: Hash;
   targetType: string;
-  targetAnchors: readonly string[];
+  targetAnchors: readonly Hash[];
   baseCursor: Cursor;
   basePrivacyEpoch: number;
   enumeration: { registryIndex: number; pageOffset: number; complete: boolean; enumeratedCount: number };
@@ -197,6 +216,7 @@ export interface ClientRegistrationRecord {
   leaseExpiresAt: string;
   state: 'ACTIVE' | 'CLOSING' | 'QUARANTINED';
   purgeGeneration?: string;
+  purgeAckGeneration?: string;
   contentHash: Hash;
 }
 
@@ -207,6 +227,37 @@ export interface PurgeAckRecord {
   deletionId: string;
   generation: string;
   clientId: string;
+  contentHash: Hash;
+}
+
+export interface DeletionTerminalRecord {
+  id: string;
+  recordType: 'deletion_terminal';
+  state: 'VERIFIED';
+  deletedType: string;
+  workItemCount: number;
+  createdAt: string;
+  verifiedAt: string;
+  contentHash: Hash;
+}
+
+export interface DeletionVerificationReceiptRecord {
+  recordId: string;
+  recordType: 'deletion_verification_receipt';
+  writtenAt: string;
+  deletionId: string;
+  generation: string;
+  verifiedId: string;
+  tombstoneId: string;
+  committedAt: string;
+  registryRevision: number;
+  auditHash: Hash;
+  journalHash: Hash;
+  leaseGeneration: number;
+  leaseFencingTokenHash: Hash;
+  terminalHash: Hash;
+  tombstoneHash: Hash;
+  anchorDigests?: readonly Hash[];
   contentHash: Hash;
 }
 
@@ -225,7 +276,10 @@ export interface ReachabilityResult {
   registryComplete: boolean;
   outcome: 'CLEAN' | 'REACHABLE' | 'CLIENTS_PENDING' | 'REGISTRY_INCOMPLETE';
   coverage: 'single-browser-in-process';
-  registryRevision?: number;
+  registryRevision: number;
+  journalHash: Hash;
+  leaseGeneration: number;
+  leaseFencingTokenHash: Hash;
 }
 
 export interface ClearAllResult {

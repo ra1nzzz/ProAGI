@@ -12,20 +12,74 @@ function createAdapter(): IndexedDbM1bAdapter {
   return adapter;
 }
 
+async function seedLegacyV2(databaseName: string, meta: Record<string, unknown>, system: unknown[] = [], journal: unknown[] = []): Promise<void> {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(databaseName, 2);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
+      const business = db.objectStoreNames.contains('business') ? request.transaction!.objectStore('business') : db.createObjectStore('business', { keyPath: 'recordId' });
+      if (!business.indexNames.contains('byDedupeKey')) business.createIndex('byDedupeKey', 'payload.dedupeKey', { unique: true });
+      for (const name of ['system', 'heads', 'ledger', 'journal', 'audit', 'projection'] as const) if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: name === 'projection' ? 'projectionId' : name === 'ledger' || name === 'journal' ? (name === 'ledger' ? 'idempotencyKey' : 'id') : 'recordId' });
+      if (!db.objectStoreNames.contains('changes')) { const changes = db.createObjectStore('changes', { keyPath: 'id' }); changes.createIndex('byCursor', 'cursor', { unique: false }); }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = database.transaction(['meta', 'system', 'journal'], 'readwrite');
+    tx.objectStore('meta').put(meta);
+    system.forEach((record) => tx.objectStore('system').put(record));
+    journal.forEach((record) => tx.objectStore('journal').put(record));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+  database.close();
+}
+
+function legacyMeta(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    key: 'canonical', cursor: '0', privacyEpoch: 0, observationMode: 'ACTIVE', recoveryMode: 'NORMAL', schemaVersion: '1.0.0',
+    logicalBytes: 0, recoveryBytes: 0, recoveryReserveBytes: 5 * 1024 * 1024, sizeEstimatorVersion: 'storage-size-v1',
+    ...overrides,
+  };
+}
+
 afterEach(async () => {
   await Promise.all(adapters.splice(0).map((adapter) => adapter.destroy()));
 });
 
 describe('IndexedDbM1bAdapter canonical transactions', () => {
+  it('classifies a blocked schema upgrade within the configured deadline and retries after the holder closes', async () => {
+    const databaseName = `blocked-open-${crypto.randomUUID()}`;
+    await seedLegacyV2(databaseName, legacyMeta());
+    const holder = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const adapter = new IndexedDbM1bAdapter(databaseName, Date.now, 20);
+    adapters.push(adapter);
+    await expect(adapter.open()).rejects.toMatchObject({ code: 'ERR_STORAGE_BLOCKED' });
+    holder.close();
+    await adapter.open();
+    expect(await adapter.getMeta()).toMatchObject({ schemaVersion: '1.0.0' });
+  });
+
   it('creates the explicit M1b stores and initial meta', async () => {
     const adapter = createAdapter();
     await adapter.open();
-    expect(adapter.getRuntimeContract()).toEqual({
+    const contract = adapter.getRuntimeContract();
+    expect(contract).toEqual({
       indexedDb: true,
       crossTabBrowserVerified: false,
       purgeCoverage: 'single-browser-in-process',
       broadcastChannelRequiredForCorrectness: false,
     });
+    expect(Object.isFrozen(contract)).toBe(true);
+    expect(() => { (contract as { crossTabBrowserVerified: boolean }).crossTabBrowserVerified = true; }).toThrow();
+    expect(adapter.getRuntimeContract().crossTabBrowserVerified).toBe(false);
     expect(await adapter.getMeta()).toMatchObject({ cursor: '0', privacyEpoch: 0, observationMode: 'ACTIVE', recoveryMode: 'NORMAL' });
   });
 
@@ -120,6 +174,42 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
     expect(await adapter.getAll('business')).toHaveLength(0);
   });
 
+  it('keeps consumed preview tokens non-reusable after receipt retention', async () => {
+    let now = Date.now();
+    const adapter = new IndexedDbM1bAdapter(`preview-retention-${crypto.randomUUID()}`, () => now);
+    adapters.push(adapter);
+    const token = 'consumed-preview-token-with-stable-entropy';
+    const bytes = new TextEncoder().encode('{"fixture":true}');
+    const staged = await adapter.stagePreview({ token, callerId: 'web-client', idempotencyKey: 'retention-idem', inputHash: sha256(new TextDecoder().decode(bytes)), bytes, privacyEpoch: 0, expiresAt: new Date(now + 60_000).toISOString() });
+    const batch = makeBatch({
+      idempotencyKey: 'retention-idem', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true, requiresPreview: true,
+      storeNames: ['business'], mutations: [{ kind: 'insertImmutable', storeName: 'business', record: toStoredRecord('retention-event', 'behavior_event', { sourceItemKey: 'retention' }) }],
+    });
+    await adapter.bindPreviewBatch(staged.token, batch.batchHash);
+    await adapter.commitPreview(token, 'web-client', batch);
+    now += 10 * 60 * 1000 + 60_000;
+    await expect(adapter.stagePreview({ token, callerId: 'web-client', idempotencyKey: 'retention-reuse', inputHash: sha256(new TextDecoder().decode(bytes)), bytes, privacyEpoch: 0, expiresAt: new Date(now + 60_000).toISOString() })).rejects.toMatchObject({ code: 'ERR_PREVIEW_CONSUMED' });
+    const tombstones = await adapter.getAll<{ recordType: string; tokenHash: string }>('system');
+    expect(tombstones).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'preview_token_tombstone', tokenHash: sha256(token) })]));
+  });
+
+  it('retains response-loss token denial after preview receipt retention', async () => {
+    let now = Date.now();
+    const adapter = new IndexedDbM1bAdapter(`preview-loss-retention-${crypto.randomUUID()}`, () => now);
+    adapters.push(adapter);
+    const token = 'response-loss-preview-token-with-stable-entropy';
+    const bytes = new TextEncoder().encode('response-loss');
+    const staged = await adapter.stagePreview({ token, callerId: 'web-client', idempotencyKey: 'loss-retention-idem', inputHash: sha256('response-loss'), bytes, privacyEpoch: 0, expiresAt: new Date(now + 60_000).toISOString() });
+    const batch = makeBatch({
+      idempotencyKey: 'loss-retention-idem', expectedCursor: '0', expectedPrivacyEpoch: 0, requiresActiveObservation: true, requiresPreview: true,
+      storeNames: ['business'], mutations: [{ kind: 'insertImmutable', storeName: 'business', record: toStoredRecord('loss-retention-event', 'behavior_event', { sourceItemKey: 'loss-retention' }) }],
+    });
+    await adapter.bindPreviewBatch(staged.token, batch.batchHash);
+    await expect(adapter.commitPreview(token, 'web-client', batch, undefined, true)).rejects.toBeInstanceOf(CommitResponseLostError);
+    now += 10 * 60 * 1000 + 60_000;
+    await expect(adapter.stagePreview({ token, callerId: 'web-client', idempotencyKey: 'loss-retention-reuse', inputHash: sha256('response-loss'), bytes, privacyEpoch: 0, expiresAt: new Date(now + 60_000).toISOString() })).rejects.toMatchObject({ code: 'ERR_PREVIEW_CONSUMED' });
+  });
+
   it('keeps ImportSession staging invisible until atomic publish', async () => {
     const adapter = createAdapter();
     const session = await adapter.createImportSession('stream-1', 'session-1');
@@ -161,5 +251,60 @@ describe('IndexedDbM1bAdapter canonical transactions', () => {
       storeNames: [], mutations: [{ kind: 'insertImmutable', storeName: 'business', record: toStoredRecord('x', 'behavior_event', {}) }],
     });
     await expect(adapter.commit(invalid)).rejects.toBeInstanceOf(M1bError);
+  });
+
+  it('migrates v2 raw purge anchors and active controls to digest-only v3 records', async () => {
+    const databaseName = `migration-${crypto.randomUUID()}`;
+    const rawAnchor = `sha256:${'a'.repeat(64)}`;
+    const rawWatermarkBase = {
+      deletionId: 'legacy-deletion', generation: 'legacy-generation', cursor: '7', targetAnchors: [rawAnchor],
+      journalHash: sha256('legacy-journal'), leaseGeneration: 1, verifiedAt: '2025-01-01T00:00:00.000Z',
+    };
+    const rawWatermark = { ...rawWatermarkBase, contentHash: hashCanonical(rawWatermarkBase) };
+    const rawJournalBase = {
+      id: 'legacy-journal', recordType: 'active_deletion_journal', state: 'FINALIZING', planId: 'legacy-plan', planHash: sha256('plan'),
+      targetId: 'target', targetHash: sha256('target'), targetType: 'work_model_claim_v1', targetAnchors: [rawAnchor], baseCursor: '6', basePrivacyEpoch: 0,
+      enumeration: { registryIndex: 0, pageOffset: 0, complete: true, enumeratedCount: 0 }, progress: { nextOrdinal: '0', completedCount: 0, totalCount: 0 },
+      purge: { generation: 'legacy-generation', cutoff: '2025-01-01T00:00:00.000Z', requiredClientIds: [] }, finalizing: { complete: true, removedControlCount: 0 },
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    };
+    const rawJournal = { ...rawJournalBase, contentHash: hashCanonical(rawJournalBase) };
+    const rawPlanBase = {
+      recordId: 'legacy-plan', recordType: 'deletion_plan', writtenAt: '2025-01-01T00:00:00.000Z',
+      target: { storeName: 'business', recordId: 'target', contentHash: sha256('target'), recordType: 'work_model_claim_v1', lineageAnchors: [rawAnchor] },
+      cause: 'user-delete', baseCursor: '6', basePrivacyEpoch: 0, baseSnapshotHash: sha256('snapshot'), closureRulesHash: sha256('rules'),
+    };
+    const rawPlanWithPlanHash = { ...rawPlanBase, planHash: sha256('legacy-plan-hash') };
+    const rawPlan = { ...rawPlanWithPlanHash, contentHash: hashCanonical(rawPlanWithPlanHash) };
+    await seedLegacyV2(databaseName, legacyMeta({ cursor: '7', purgeWatermark: rawWatermark, lastPurgeCursor: '7' }), [rawPlan], [rawJournal]);
+    const adapter = new IndexedDbM1bAdapter(databaseName);
+    adapters.push(adapter);
+    await adapter.open();
+
+    const migratedMeta = await adapter.getMeta();
+    expect(migratedMeta.recoveryMode).toBe('NORMAL');
+    expect(migratedMeta.purgedAnchorDigests).toEqual([sha256(rawAnchor)]);
+    expect(migratedMeta.purgedAnchorDigests).not.toContain(rawAnchor);
+    expect(migratedMeta.purgeWatermark?.anchorDigests).toEqual([sha256(rawAnchor)]);
+    const migratedJournal = await adapter.getRecord<{ targetAnchors: string[] }>('journal', 'legacy-journal');
+    expect(migratedJournal?.targetAnchors).toEqual([sha256(rawAnchor)]);
+    expect(migratedJournal?.targetAnchors).not.toContain(rawAnchor);
+    const migratedPlan = await adapter.getRecord<{ target: { lineageAnchorDigests: string[]; lineageAnchors?: string[] } }>('system', 'legacy-plan');
+    expect(migratedPlan?.target.lineageAnchorDigests).toEqual([sha256(rawAnchor)]);
+    expect(migratedPlan?.target.lineageAnchors).toBeUndefined();
+  });
+
+  it('migrates unrecoverable v2 purge history to fail-closed recovery-only mode', async () => {
+    const databaseName = `migration-loss-${crypto.randomUUID()}`;
+    await seedLegacyV2(databaseName, legacyMeta({ cursor: '5', lastPurgeCursor: '4' }));
+    const adapter = new IndexedDbM1bAdapter(databaseName);
+    adapters.push(adapter);
+    await adapter.open();
+    expect(await adapter.getMeta()).toMatchObject({ recoveryMode: 'RECOVERY_ONLY', cursor: '5', lastPurgeCursor: '4' });
+    const batch = makeBatch({
+      idempotencyKey: 'blocked-after-history-loss', expectedCursor: '5', expectedPrivacyEpoch: 0,
+      storeNames: [], mutations: [],
+    });
+    await expect(adapter.commit(batch)).rejects.toMatchObject({ code: 'ERR_RECOVERY_REQUIRED' });
   });
 });

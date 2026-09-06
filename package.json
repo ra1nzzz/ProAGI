@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:e2e": "tsc -b && VITE_PROAGI_E2E_HOOKS=1 vite build --outDir dist-e2e",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
@@ -33,11 +34,13 @@
     "check:suites": "node scripts/check-suites.mjs",
     "evidence:init": "node scripts/create-evidence.mjs",
     "verify:csp": "node scripts/check-csp.mjs",
+    "check:production-artifact": "node scripts/check-production-artifact.mjs",
     "smoke": "node scripts/run-test-report.mjs playwright --lane pr-smoke -- tests/e2e/app.spec.ts --grep \"renders the canonical\"",
     "verify": "npm run verify:pr",
-    "verify:pr": "npm run check:suites && npm run test:release-gates && npm run typecheck && npm run lint && npm run verify:csp && npm audit --audit-level=high && npm run test:report && npm run build && npm run test:e2e:report && npm run smoke",
-    "verify:nightly": "npm run verify:pr && node scripts/run-test-report.mjs vitest --lane nightly-privacy -- tests/privacy && node scripts/run-test-report.mjs vitest --lane nightly-worker -- tests/worker",
-    "verify:release": "npm run verify:nightly && node scripts/check-release-candidate.mjs"
+    "verify-tier": "node scripts/verify-tier.mjs",
+    "verify:pr": "npm run verify-tier -- --tier pr",
+    "verify:nightly": "npm run verify-tier -- --tier nightly",
+    "verify:release": "npm run verify-tier -- --tier release"
   },
   "dependencies": {
     "@fontsource/inter": "5.2.8",

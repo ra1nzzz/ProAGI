@@ -29,7 +29,7 @@ export default defineConfig({
     video: 'off'
   },
   webServer: {
-    command: `VITE_PROAGI_E2E_HOOKS=1 npm run build && npm run preview -- --strictPort --port ${port}`,
+    command: `npm run build:e2e && npm run preview -- --outDir dist-e2e --strictPort --port ${port}`,
     url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000

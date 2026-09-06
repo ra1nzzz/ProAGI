@@ -6,10 +6,11 @@ interface RecoverySurfaceProps {
   kind: RecoveryKind;
   returnFocusRef: RefObject<HTMLElement | null>;
   onRetry: () => void;
-  onDismissDemo: () => void;
+  onDismissDemo?: () => void;
+  dismissible?: boolean;
 }
 
-export function RecoverySurface({ kind, returnFocusRef, onRetry, onDismissDemo }: RecoverySurfaceProps) {
+export function RecoverySurface({ kind, returnFocusRef, onRetry, onDismissDemo, dismissible = true }: RecoverySurfaceProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
@@ -42,7 +43,7 @@ export function RecoverySurface({ kind, returnFocusRef, onRetry, onDismissDemo }
         {blocked ? <p className="sr-only" role="alert">清除被阻止，数据尚未清除。</p> : null}
         <div className="button-row">
           <button type="button" className="button button--primary" onClick={onRetry}>重试恢复</button>
-          <button type="button" className="button button--quiet" onClick={onDismissDemo}>退出恢复演示</button>
+          {dismissible && onDismissDemo ? <button type="button" className="button button--quiet" onClick={onDismissDemo}>退出恢复演示</button> : null}
         </div>
       </div>
     </section>

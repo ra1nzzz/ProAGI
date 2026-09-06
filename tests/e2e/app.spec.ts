@@ -216,6 +216,25 @@ test('operation-scoped response loss reconciles one durable import', async ({ pa
   await expect(page.getByRole('button', { name: '接受 Insight' })).toBeEnabled();
 });
 
+test('terminal deletion response loss reconciles the committed verification receipt', async ({ page }) => {
+  await installE2eHarness(page);
+  await page.goto('/');
+  await expect(page.locator('.domain-loop__status')).toContainText('本地 canonical store 已就绪');
+  await page.evaluate(async () => {
+    const harness = (window as unknown as { __proagiE2e: { runtime?: { deleteWithResponseLoss?: () => Promise<void> } } }).__proagiE2e;
+    if (!harness.runtime?.deleteWithResponseLoss) throw new Error('E2E deletion response-loss bridge unavailable');
+    await harness.runtime.deleteWithResponseLoss();
+  });
+  const journal = await readStore(page, 'journal') as Array<Record<string, unknown>>;
+  const system = await readStore(page, 'system') as Array<Record<string, unknown>>;
+  expect(journal.filter((record) => record.recordType === 'active_deletion_journal')).toEqual([]);
+  expect(journal.filter((record) => record.recordType === 'deletion_terminal')).toHaveLength(1);
+  expect(system.filter((record) => record.recordType === 'deletion_verification_receipt')).toHaveLength(1);
+  expect(system.filter((record) => record.recordType === 'tombstone')).toHaveLength(1);
+  await page.reload();
+  await expect(page.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
+});
+
 test('commit TOCTOU fails closed when privacy changes after persistence', async ({ page, context }) => {
   await installE2eHarness(page);
   await page.goto('/');
@@ -280,6 +299,7 @@ test('a second tab releases deleted lineage before purge audit completes', async
   const lifecycle = await context.newCDPSession(secondTab);
   await page.bringToFront();
   await setLifecycleState(lifecycle, 'frozen');
+  await new Promise((resolve) => setTimeout(resolve, 7_000));
   await expect.poll(async () => {
     const journals = await readStore(page, 'journal') as Array<Record<string, unknown>>;
     return journals.some((record) => record.recordType === 'active_deletion_journal' && ['PURGE_PENDING', 'AUDITING'].includes(String(record.state)));

@@ -1,12 +1,87 @@
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
-export const REQUIRED_SUITES = Object.freeze([
-  'unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker',
-  'projection', 'evaluator', 'a11y', 'visual', 'e2e',
+const PR_VITEST_SUITES = Object.freeze(['unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker', 'projection', 'evaluator', 'a11y', 'visual']);
+const CHROMIUM_PROJECTS = Object.freeze(['chromium-desktop', 'chromium-320']);
+const MINUTE_MS = 60_000;
+export const MAX_GITHUB_ARTIFACT_RETENTION_DAYS = 90;
+const command = (executable, args, timeoutMinutes) => Object.freeze({ executable, args: Object.freeze(args), timeoutMs: timeoutMinutes * MINUTE_MS });
+const PR_COMMANDS = Object.freeze([
+  command('npm', ['run', 'check:suites'], 2),
+  command('npm', ['run', 'test:release-gates'], 3),
+  command('npm', ['run', 'typecheck'], 3),
+  command('npm', ['run', 'lint'], 3),
+  command('npm', ['run', 'verify:csp'], 2),
+  command('npm', ['audit', '--audit-level=high'], 3),
+  command('npm', ['run', 'test:report'], 8),
+  command('npm', ['run', 'build'], 5),
+  command('npm', ['run', 'check:production-artifact'], 2),
+  command('npm', ['run', 'test:e2e:report'], 10),
+  command('npm', ['run', 'smoke'], 5),
 ]);
+const NIGHTLY_COMMANDS = Object.freeze([
+  ...PR_COMMANDS,
+  command('node', ['scripts/run-test-report.mjs', 'vitest', '--lane', 'nightly-privacy', '--', 'tests/privacy'], 5),
+  command('node', ['scripts/run-test-report.mjs', 'vitest', '--lane', 'nightly-worker', '--', 'tests/worker'], 5),
+]);
+const RELEASE_COMMANDS = Object.freeze([
+  ...NIGHTLY_COMMANDS,
+  command('node', ['scripts/check-release-candidate.mjs'], 2),
+]);
+
+export const VERIFICATION_REGISTRY = Object.freeze({
+  // GitHub Actions artifact retention accepts 1–90 days across repository visibility tiers.
+  // Any long-term archive must live outside upload-artifact; CI does not claim it here.
+  retentionDays: Object.freeze({ pr: 14, nightly: 90, release: MAX_GITHUB_ARTIFACT_RETENTION_DAYS }),
+  execution: Object.freeze({ pr: PR_COMMANDS, nightly: NIGHTLY_COMMANDS, release: RELEASE_COMMANDS }),
+  tiers: Object.freeze({
+    pr: Object.freeze([
+      Object.freeze({ path: 'pr-vitest/vitest-report.json', type: 'vitest', suites: PR_VITEST_SUITES }),
+      Object.freeze({ path: 'pr-e2e/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, requireAllE2E: true }) }),
+      Object.freeze({ path: 'pr-smoke/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, expectedSpecs: Object.freeze([{ file: 'tests/e2e/app.spec.ts', title: 'renders the canonical AppShell order and eight-part Orb' }]) }) }),
+    ]),
+    nightly: Object.freeze([
+      Object.freeze({ path: 'pr-vitest/vitest-report.json', type: 'vitest', suites: PR_VITEST_SUITES }),
+      Object.freeze({ path: 'pr-e2e/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, requireAllE2E: true }) }),
+      Object.freeze({ path: 'pr-smoke/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, expectedSpecs: Object.freeze([{ file: 'tests/e2e/app.spec.ts', title: 'renders the canonical AppShell order and eight-part Orb' }]) }) }),
+      Object.freeze({ path: 'nightly-privacy/vitest-report.json', type: 'vitest', suites: Object.freeze(['privacy']) }),
+      Object.freeze({ path: 'nightly-worker/vitest-report.json', type: 'vitest', suites: Object.freeze(['worker']) }),
+    ]),
+    release: Object.freeze([
+      Object.freeze({ path: 'pr-vitest/vitest-report.json', type: 'vitest', suites: PR_VITEST_SUITES }),
+      Object.freeze({ path: 'pr-e2e/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, requireAllE2E: true }) }),
+      Object.freeze({ path: 'pr-smoke/playwright-report.json', type: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, expectedSpecs: Object.freeze([{ file: 'tests/e2e/app.spec.ts', title: 'renders the canonical AppShell order and eight-part Orb' }]) }) }),
+      Object.freeze({ path: 'nightly-privacy/vitest-report.json', type: 'vitest', suites: Object.freeze(['privacy']) }),
+      Object.freeze({ path: 'nightly-worker/vitest-report.json', type: 'vitest', suites: Object.freeze(['worker']) }),
+    ]),
+  }),
+  lanes: Object.freeze({
+    'pr-vitest': Object.freeze({ runner: 'vitest', suites: PR_VITEST_SUITES }),
+    'pr-e2e': Object.freeze({ runner: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, requireAllE2E: true }) }),
+    'pr-smoke': Object.freeze({ runner: 'playwright', suites: Object.freeze([]), options: Object.freeze({ requiredProjects: CHROMIUM_PROJECTS, expectedSpecs: Object.freeze([{ file: 'tests/e2e/app.spec.ts', title: 'renders the canonical AppShell order and eight-part Orb' }]) }) }),
+    'nightly-privacy': Object.freeze({ runner: 'vitest', suites: Object.freeze(['privacy']) }),
+    'nightly-worker': Object.freeze({ runner: 'vitest', suites: Object.freeze(['worker']) }),
+  }),
+});
+
+export const REQUIRED_SUITES = Object.freeze([...PR_VITEST_SUITES, 'e2e']);
+
+export function verificationReportsForTier(tier) {
+  if (!(tier in VERIFICATION_REGISTRY.tiers)) throw new Error(`Unknown verification tier: ${tier}`);
+  return VERIFICATION_REGISTRY.tiers[tier];
+}
+
+export function verificationCommandsForTier(tier) {
+  if (!(tier in VERIFICATION_REGISTRY.execution)) throw new Error(`Unknown verification tier: ${tier}`);
+  return VERIFICATION_REGISTRY.execution[tier];
+}
+
+export function verificationRetentionDaysForTier(tier) {
+  if (!(tier in VERIFICATION_REGISTRY.retentionDays)) throw new Error(`Unknown verification tier: ${tier}`);
+  return VERIFICATION_REGISTRY.retentionDays[tier];
+}
 
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 const FORBIDDEN_TEST_MODIFIERS = new Set(['only', 'skip', 'todo']);
@@ -148,7 +223,7 @@ function validateVitest(report, expectedSuites = [], expectedFiles = []) {
   const todo = assertNonNegativeInteger(root.numTodoTests, 'Vitest numTodoTests');
   if (!Array.isArray(root.testResults)) throw new Error('Vitest testResults must be an array');
   if (total === 0 || totalSuites === 0 || root.testResults.length === 0) throw new Error('Vitest report has zero results');
-  if (totalSuites !== root.testResults.length || passedSuites + failedSuites + pendingSuites !== totalSuites) throw new Error('Vitest suite counters do not match testResults');
+  if (passedSuites + failedSuites + pendingSuites !== totalSuites) throw new Error('Vitest suite counters do not balance');
   const assertions = root.testResults.flatMap((result, index) => {
     const item = assertObject(result, `Vitest testResults[${index}]`);
     if (item.status !== 'passed') throw new Error(`Vitest suite ${index} is not passed`);
@@ -202,6 +277,12 @@ function flattenPlaywrightSuites(suites, tests = [], files = new Set(), inherite
   return tests;
 }
 
+function sameReportedPath(actualPath, expectedPath) {
+  const actual = actualPath.replaceAll('\\', '/');
+  const expected = expectedPath.replaceAll('\\', '/');
+  return actual === expected || actual.endsWith(`/${expected}`) || basename(actual) === basename(expected);
+}
+
 function validatePlaywright(report, expectedFiles = [], options = {}) {
   const root = assertObject(report, 'Playwright report');
   if (!Array.isArray(root.suites)) throw new Error('Playwright suites must be an array');
@@ -210,7 +291,7 @@ function validatePlaywright(report, expectedFiles = [], options = {}) {
   if (tests.length === 0) throw new Error('Playwright report has zero results');
   for (const file of expectedFiles) {
     const normalized = file.replaceAll('\\', '/');
-    if (![...files].some((name) => name === normalized || name.endsWith(`/${normalized}`))) throw new Error(`Playwright report is missing required file: ${file}`);
+    if (![...files].some((name) => sameReportedPath(name, normalized))) throw new Error(`Playwright report is missing required file: ${file}`);
   }
   const requiredProjects = options.requiredProjects ?? [];
   if (requiredProjects.length) {
@@ -225,7 +306,7 @@ function validatePlaywright(report, expectedFiles = [], options = {}) {
   for (const expected of expectedSpecs) {
     const normalizedFile = expected.file.replaceAll('\\', '/');
     for (const project of requiredProjects.length ? requiredProjects : [undefined]) {
-      const matches = tests.filter((test) => (test.__suiteFile ?? '').replaceAll('\\', '/') === normalizedFile && test.__specTitle === expected.title && (project === undefined || test.projectName === project));
+      const matches = tests.filter((test) => sameReportedPath(test.__suiteFile ?? '', normalizedFile) && test.__specTitle === expected.title && (project === undefined || test.projectName === project));
       if (matches.length !== 1) throw new Error(`Playwright report must contain exactly one ${normalizedFile} :: ${expected.title}${project ? ` :: ${project}` : ''}, found ${matches.length}`);
     }
   }

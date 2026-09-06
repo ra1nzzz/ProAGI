@@ -1,7 +1,7 @@
 import { materializeBehaviorEvents, parseFixtureJson } from '../domain/fixture';
 import { runInsightLoop } from '../domain/insightLoop';
 import { replayV1, type ReplaySnapshotV1 } from '../domain/replay';
-import type { BehaviorEvent, CorrectionCommand, InsightLoopOutput } from '../domain/types';
+import type { BehaviorEvent, CorrectionCommand, InsightLoopOutput, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import { InMemoryKnowledgePort } from './knowledge';
 import { PreviewGuard, type PreviewReceipt } from './previewGuard';
 import { ShadowActionSink } from './action';
@@ -32,6 +32,18 @@ export class InsightLoopService {
 
   restoreEvents(events: readonly BehaviorEvent[]): void {
     this.events = events;
+  }
+
+  knowledgeSnapshot(): KnowledgeSnapshot {
+    return this.knowledge.snapshot();
+  }
+
+  hydrateKnowledge(snapshot: KnowledgeSnapshot): void {
+    this.knowledge.hydrate(snapshot);
+  }
+
+  currentClaim(claimKey: string): WorkModelClaim | undefined {
+    return this.knowledge.currentClaim(claimKey);
   }
 
   preview(utf8: string, now: number): { readonly token: string; readonly acceptedCount: number; readonly rejectedCount: number } {

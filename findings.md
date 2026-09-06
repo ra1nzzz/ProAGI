@@ -268,3 +268,11 @@
 - Runtime visibility catch-up 同时检查 active journal 与 durable watermark；冻结标签在 active journal 已消失后，可按 last durable cursor 与 target anchors 释放 stale heap，再 hydrate 当前 store。
 - `auditRoots` 在 final Tv 内重算 required purge ACK 集合；缺 ACK 返回 `CLIENTS_PENDING`，不能推进 VERIFIED。
 - 本轮已通过 typecheck/lint、privacy 15/15、integration 13/13；durable frozen-tab Playwright 2/2；cross-tab barrier Playwright 2/2。完整 release gate 尚未重跑。
+
+## Final M1 hardening review
+
+- Runtime default wiring now lives in the outer `browserRuntimeComposition` factory; `BrowserInsightRuntime` requires injected storage/service ports and application storage contracts contain no IndexedDB types.
+- Runtime foreground failures synchronize the runtime-owned fault snapshot into UI recovery state; ambiguous response-loss reconciliation always becomes `ERR_COMMIT_RECONCILIATION_INVALID` with the original error as `cause`.
+- Expected privacy, stale-preview, policy, cursor/epoch, quota and bounded-input outcomes use an explicit disposition table; unknown/integrity/storage failures remain fail-closed faults.
+- Verification commands have registry-owned timeouts and POSIX process-group TERM→KILL cleanup; GitHub Actions evidence retention is explicitly capped at 90 days.
+- Final three-dimensional review found 0 P0 / 0 P1; Gate 1 remains `CONDITIONAL` because NVDA, human visual approval and hosted CI are not run locally.

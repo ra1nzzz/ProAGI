@@ -2,56 +2,223 @@ name: verify
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   schedule:
     - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Verification tier
+        required: true
+        type: choice
+        options: [pr, nightly, release]
+        default: pr
+      release_tag:
+        description: Required for release dispatch; exact semantic-version tag (for example v0.1.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event_name == 'schedule' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   pr:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.tier == 'pr')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      EVIDENCE_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_TIER: pr
+      EVIDENCE_RANDOM_SEED: github-${{ github.run_id }}-${{ github.run_attempt }}-pr
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.15.0
-          cache: npm
-      - name: Install locked dependencies
-        run: npm ci
-      - name: Install pinned Chromium runtime
-        run: npx playwright install --with-deps chromium
-      - name: Verify pull request tier
-        if: github.event_name != 'schedule'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 24.15.0, cache: npm }
+      - name: Install exact npm toolchain
+        run: npm install --global npm@11.12.1
+      - name: Assert exact Node and npm toolchain
+        run: test "$(node --version)" = "v24.15.0" && test "$(npm --version)" = "11.12.1"
+      - run: npm ci
+      - name: Check patch whitespace
+        run: git diff --check
+      - name: Resolve PR evidence metadata
+        id: evidence_metadata
+        run: echo "retention_days=$(node scripts/verification-metadata.mjs --tier pr)" >> "$GITHUB_OUTPUT"
+      - run: npx playwright install --with-deps chromium
+      - name: Verify PR tier
+        id: verify
+        continue-on-error: true
         shell: bash
         run: |
+          set -o pipefail
+          set +e
           mkdir -p evidence-logs
-          npm run verify:pr 2>&1 | tee evidence-logs/verify-pr.log
-          test ${PIPESTATUS[0]} -eq 0
-      - name: Verify nightly tier
-        if: github.event_name == 'schedule'
-        shell: bash
-        run: |
-          mkdir -p evidence-logs
-          npm run verify:nightly 2>&1 | tee evidence-logs/verify-pr.log
-          test ${PIPESTATUS[0]} -eq 0
-      - name: Create evidence manifest
+          npm run verify-tier -- --tier pr 2>&1 | tee evidence-logs/pr.log
+          verify_status="${PIPESTATUS[0]}"
+          printf '\nCOMMAND_RECORD command="npm run verify-tier -- --tier pr" exitCode=%s retries=0\n' "$verify_status" >> evidence-logs/pr.log
+          exit "$verify_status"
+      - name: Create immutable evidence
         if: always()
         env:
-          EVIDENCE_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          if [ "${{ job.status }}" = "failure" ]; then export EVIDENCE_STATUS=FAIL VERIFY_PR_EXIT_CODE=1; else export EVIDENCE_STATUS=CONDITIONAL VERIFY_PR_EXIT_CODE=0; fi
-          npm run evidence:init
-      - name: Upload evidence with bounded retention
+          EVIDENCE_TARGET_SHA: ${{ github.sha }}
+          EVIDENCE_STATUS: ${{ steps.verify.outcome == 'success' && 'CONDITIONAL' || 'FAIL' }}
+          EVIDENCE_CANCELLED: ${{ cancelled() && 'true' || 'false' }}
+        run: npm run evidence:init
+      - name: Scan staged evidence before upload
+        id: artifact_scan
         if: always()
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        run: node scripts/scan-artifacts.mjs --root evidence/M1/${{ env.EVIDENCE_RUN_ID }}/ --quarantine evidence/quarantine/${{ env.EVIDENCE_RUN_ID }}/ --report evidence-scan/${{ env.EVIDENCE_RUN_ID }}.json
+      - name: Upload PR evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: proagi-m1-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: proagi-m1-pr-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            evidence/M1/
-            test-results/
-            evidence-logs/
+            evidence/M1/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence/quarantine/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence-scan/github-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: ${{ steps.evidence_metadata.outputs.retention_days }}
+      - if: always() && (steps.verify.outcome != 'success' || steps.artifact_scan.outcome != 'success')
+        run: exit 1
+
+  nightly:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      EVIDENCE_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_TIER: nightly
+      EVIDENCE_RANDOM_SEED: github-${{ github.run_id }}-${{ github.run_attempt }}-nightly
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 24.15.0, cache: npm }
+      - name: Install exact npm toolchain
+        run: npm install --global npm@11.12.1
+      - name: Assert exact Node and npm toolchain
+        run: test "$(node --version)" = "v24.15.0" && test "$(npm --version)" = "11.12.1"
+      - run: npm ci
+      - name: Check patch whitespace
+        run: git diff --check
+      - name: Resolve nightly evidence metadata
+        id: evidence_metadata
+        run: echo "retention_days=$(node scripts/verification-metadata.mjs --tier nightly)" >> "$GITHUB_OUTPUT"
+      - run: npx playwright install --with-deps chromium
+      - name: Verify nightly tier
+        id: verify
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          mkdir -p evidence-logs
+          npm run verify-tier -- --tier nightly 2>&1 | tee evidence-logs/nightly.log
+          verify_status="${PIPESTATUS[0]}"
+          printf '\nCOMMAND_RECORD command="npm run verify-tier -- --tier nightly" exitCode=%s retries=0\n' "$verify_status" >> evidence-logs/nightly.log
+          exit "$verify_status"
+      - name: Create immutable evidence
+        if: always()
+        env:
+          EVIDENCE_TARGET_SHA: ${{ github.sha }}
+          EVIDENCE_STATUS: ${{ steps.verify.outcome == 'success' && 'CONDITIONAL' || 'FAIL' }}
+          EVIDENCE_CANCELLED: ${{ cancelled() && 'true' || 'false' }}
+        run: npm run evidence:init
+      - name: Scan staged evidence before upload
+        id: artifact_scan
+        if: always()
+        continue-on-error: true
+        run: node scripts/scan-artifacts.mjs --root evidence/M1/${{ env.EVIDENCE_RUN_ID }}/ --quarantine evidence/quarantine/${{ env.EVIDENCE_RUN_ID }}/ --report evidence-scan/${{ env.EVIDENCE_RUN_ID }}.json
+      - name: Upload nightly evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proagi-m1-nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/M1/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence/quarantine/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence-scan/github-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: ${{ steps.evidence_metadata.outputs.retention_days }}
+      - if: always() && (steps.verify.outcome != 'success' || steps.artifact_scan.outcome != 'success')
+        run: exit 1
+
+  release_candidate:
+    name: release-candidate (no promotion)
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tier == 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: release
+    env:
+      EVIDENCE_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_TIER: release
+      EVIDENCE_RANDOM_SEED: github-${{ github.run_id }}-${{ github.run_attempt }}-release
+      RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          fetch-depth: 0
+      - name: Resolve release target
+        id: release_target
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 24.15.0, cache: npm }
+      - name: Install exact npm toolchain
+        run: npm install --global npm@11.12.1
+      - name: Assert exact Node and npm toolchain
+        run: test "$(node --version)" = "v24.15.0" && test "$(npm --version)" = "11.12.1"
+      - run: npm ci
+      - name: Check patch whitespace
+        run: git diff --check
+      - name: Resolve release evidence metadata
+        id: evidence_metadata
+        run: echo "retention_days=$(node scripts/verification-metadata.mjs --tier release)" >> "$GITHUB_OUTPUT"
+      - run: npx playwright install --with-deps chromium
+      - name: Verify release candidate tier
+        id: verify
+        continue-on-error: true
+        env:
+          RELEASE_TARGET_SHA: ${{ steps.release_target.outputs.sha }}
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          mkdir -p evidence-logs
+          npm run verify-tier -- --tier release 2>&1 | tee evidence-logs/release.log
+          verify_status="${PIPESTATUS[0]}"
+          printf '\nCOMMAND_RECORD command="npm run verify-tier -- --tier release" exitCode=%s retries=0\n' "$verify_status" >> evidence-logs/release.log
+          exit "$verify_status"
+      - name: Create immutable release evidence
+        if: always()
+        env:
+          EVIDENCE_TARGET_SHA: ${{ steps.release_target.outputs.sha }}
+          EVIDENCE_STATUS: ${{ steps.verify.outcome == 'success' && 'CONDITIONAL' || 'FAIL' }}
+          EVIDENCE_CANCELLED: ${{ cancelled() && 'true' || 'false' }}
+        run: npm run evidence:init
+      - name: Scan staged evidence before upload
+        id: artifact_scan
+        if: always()
+        continue-on-error: true
+        run: node scripts/scan-artifacts.mjs --root evidence/M1/${{ env.EVIDENCE_RUN_ID }}/ --quarantine evidence/quarantine/${{ env.EVIDENCE_RUN_ID }}/ --report evidence-scan/${{ env.EVIDENCE_RUN_ID }}.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proagi-m1-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/M1/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence/quarantine/github-${{ github.run_id }}-${{ github.run_attempt }}/
+            evidence-scan/github-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: ${{ steps.evidence_metadata.outputs.retention_days }}
+      - if: always() && (steps.verify.outcome != 'success' || steps.artifact_scan.outcome != 'success')
+        run: exit 1

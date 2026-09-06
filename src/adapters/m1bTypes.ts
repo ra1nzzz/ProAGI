@@ -1,3 +1,4 @@
+import { CommitResponseLostError as ApplicationCommitResponseLostError } from '../application/storageContracts';
 import type { Hash } from '../domain/types';
 
 export type Cursor = string;
@@ -187,7 +188,7 @@ export interface ActiveDeletionJournalRecord {
   targetAnchors: readonly Hash[];
   baseCursor: Cursor;
   basePrivacyEpoch: number;
-  enumeration: { registryIndex: number; pageOffset: number; complete: boolean; enumeratedCount: number };
+  enumeration: { registryIndex: number; pageOffset: number; continuationKey?: string; complete: boolean; enumeratedCount: number };
   progress: { nextOrdinal: Cursor; completedCount: number; totalCount: number };
   purge: { generation: string; cutoff: string; sealedAt?: string; requiredClientIds: readonly string[] };
   finalizing: { complete: boolean; removedControlCount: number };
@@ -288,14 +289,15 @@ export interface ClearAllResult {
   cachesCleared: boolean;
   emptyReopenVerified: boolean;
   errorCode?: 'ERR_STORAGE_BLOCKED';
+  pendingDeletion?: boolean;
   coverage: 'single-browser-in-process';
 }
 
 export interface M1bRuntimeContract {
-  indexedDb: true;
-  crossTabBrowserVerified: false;
-  purgeCoverage: 'single-browser-in-process';
-  broadcastChannelRequiredForCorrectness: false;
+  readonly indexedDb: true;
+  readonly crossTabBrowserVerified: false;
+  readonly purgeCoverage: 'single-browser-in-process';
+  readonly broadcastChannelRequiredForCorrectness: false;
 }
 
 export class M1bError extends Error {
@@ -305,8 +307,8 @@ export class M1bError extends Error {
   }
 }
 
-export class CommitResponseLostError extends M1bError {
+export class CommitResponseLostError extends ApplicationCommitResponseLostError {
   constructor(readonly committedCursor: Cursor) {
-    super('ERR_TEST_RESPONSE_LOST');
+    super(committedCursor);
   }
 }

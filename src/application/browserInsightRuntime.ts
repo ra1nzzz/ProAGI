@@ -1,19 +1,99 @@
-import { IndexedDbM1bAdapter, makeBatch, toStoredRecord } from '../adapters/indexedDbM1b';
-import { CommitResponseLostError } from '../adapters/m1bTypes';
-import type { AtomicMutationBatch, StoredRecord } from '../adapters/m1bTypes';
+import { makeBatch, toStoredRecord, CommitResponseLostError } from './storageContracts';
+import type { AtomicMutationBatch, StoredRecord } from './storageContracts';
 import { sha256 } from '../domain/canonical';
-import type { BehaviorEvent, CorrectionAction, CorrectionCommand, CorrectionRecord, KnowledgeHead, KnowledgeSnapshot, KnowledgeVersion, WorkModelClaim } from '../domain/types';
+import type { CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import { developerDayFixtureJson } from '../fixtures/developerDay';
 import type { CorrectionResult } from './knowledge';
-import type { ControlPort, CorrectionPort, ObservationPort, ObservationPreviewDTO } from './ports';
-import { InsightLoopService, type ImportCommit } from './insightService';
+import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTIME_SNAPSHOT_EVENT, type ControlPort, type CorrectionPort, type ExternalPurgeNotification, type InsightServicePort, type ObservationPort, type ObservationPreviewDTO, type PurgeCommittedNotification, type RuntimeErrorNotification, type RuntimeNotificationPort, type RuntimeSnapshotNotification } from './ports';
+import type { ImportCommit } from './insightService';
+import { decodeBehaviorEvent, decodeCorrectionRecord, decodeFixtureMarker, decodeKnowledgeHead, decodeKnowledgeVersion, decodeWorkModelClaim } from './persistedDecoders';
+import type { RuntimeStoragePort } from './storagePort';
 
-const DATABASE_NAME = 'proagi-insight-loop-m1-v1';
 const FIXTURE_MARKER_ID = 'fixture-commit:developer-day-bundled-v1';
+const PURGE_CLIENT_WAIT_MS = 15_000;
+const PURGE_CLIENT_LEASE_MS = 6_000;
+const CACHE_CLEAR_TIMEOUT_MS = 10_000;
+const PURGE_UI_TIMEOUT_MS = 2_000;
+
+export interface BrowserRuntimeScheduler {
+  readonly setTimeout: typeof setTimeout;
+  readonly clearTimeout: typeof clearTimeout;
+  readonly setInterval: typeof setInterval;
+  readonly clearInterval: typeof clearInterval;
+}
+
+export interface BrowserRuntimeCacheStore {
+  keys(): Promise<string[]>;
+  delete(request: string): Promise<boolean>;
+}
+
+const DEFAULT_RUNTIME_SCHEDULER: BrowserRuntimeScheduler = {
+  setTimeout: globalThis.setTimeout.bind(globalThis),
+  clearTimeout: globalThis.clearTimeout.bind(globalThis),
+  setInterval: globalThis.setInterval.bind(globalThis),
+  clearInterval: globalThis.clearInterval.bind(globalThis),
+};
+
+const defaultCacheStore = (): BrowserRuntimeCacheStore | null => 'caches' in globalThis ? globalThis.caches : null;
+
+const NOOP_RUNTIME_NOTIFICATION_PORT: RuntimeNotificationPort = Object.freeze({
+  prepareForPurge: async () => undefined,
+  publishSnapshot: () => undefined,
+  publishError: () => undefined,
+});
+
+export function createWindowRuntimeNotificationPort(): RuntimeNotificationPort {
+  return {
+    prepareForPurge: (detail) => {
+      if (typeof window === 'undefined') return Promise.resolve();
+      const requestId = crypto.randomUUID();
+      return new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          window.clearTimeout(timer);
+          window.removeEventListener(PURGE_COMMITTED_EVENT, onCommitted);
+        };
+        const onCommitted = (event: Event) => {
+          const committed = (event as CustomEvent<PurgeCommittedNotification>).detail;
+          if (committed?.requestId !== requestId) return;
+          cleanup();
+          resolve();
+        };
+        const timer = window.setTimeout(() => {
+          cleanup();
+          reject(new Error('ERR_PURGE_UI_UNCONFIRMED'));
+        }, PURGE_UI_TIMEOUT_MS);
+        window.addEventListener(PURGE_COMMITTED_EVENT, onCommitted);
+        const notification: ExternalPurgeNotification = { ...detail, requestId };
+        window.dispatchEvent(new CustomEvent<ExternalPurgeNotification>(EXTERNAL_PURGE_EVENT, { detail: notification }));
+      });
+    },
+    publishSnapshot: (detail) => {
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent<RuntimeSnapshotNotification>(RUNTIME_SNAPSHOT_EVENT, { detail }));
+    },
+    publishError: (detail) => {
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent<RuntimeErrorNotification>(RUNTIME_ERROR_EVENT, { detail }));
+    },
+  };
+}
 
 type FixtureMarker = { readonly asOf: number; readonly fixtureId: 'developer-day-bundled-v1' };
+type PurgeChannelMessage =
+  | { readonly type: 'STATE_CHANGED'; readonly clientId: string }
+  | { readonly type: 'PURGE_REQUEST'; readonly deletionId: string; readonly generation: string; readonly clientId: string };
+
+function decodePurgeChannelMessage(value: unknown): PurgeChannelMessage | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.clientId !== 'string' || candidate.clientId.length === 0 || typeof candidate.type !== 'string') return undefined;
+  if (candidate.type === 'STATE_CHANGED') return { type: 'STATE_CHANGED', clientId: candidate.clientId };
+  if (candidate.type === 'PURGE_REQUEST' && typeof candidate.deletionId === 'string' && candidate.deletionId.length > 0 && typeof candidate.generation === 'string' && candidate.generation.length > 0) {
+    return { type: 'PURGE_REQUEST', deletionId: candidate.deletionId, generation: candidate.generation, clientId: candidate.clientId };
+  }
+  return undefined;
+}
+
 type PendingPreview = {
-  readonly candidate: InsightLoopService;
+  readonly candidate: InsightServicePort;
   readonly commit: ImportCommit;
   readonly token: string;
   readonly batch: AtomicMutationBatch;
@@ -25,24 +105,48 @@ export interface BrowserRuntimeSnapshot {
   readonly cursor: string;
   readonly privacyEpoch: number;
   readonly imported: ImportCommit | null;
+  readonly runtimeFaulted: boolean;
 }
 
 export interface BrowserRuntimeTestHooks {
   readonly afterCommitPersisted?: () => void | Promise<void>;
   readonly beforePurgeRelease?: () => void | Promise<void>;
+  readonly simulateDeletionResponseLoss?: () => boolean;
+}
+
+// Storage is injected through the independent application port; IndexedDB is only the browser default.
+export interface BrowserInsightRuntimeOptions {
+  readonly adapterFactory: () => RuntimeStoragePort;
+  readonly serviceFactory: () => InsightServicePort;
+  readonly channelFactory?: () => BroadcastChannel | null;
+  readonly clientIdFactory?: () => string;
+  readonly clock?: () => number;
+  readonly scheduler?: BrowserRuntimeScheduler;
+  readonly cacheStore?: BrowserRuntimeCacheStore | null;
+  readonly notificationPort?: RuntimeNotificationPort;
+  readonly cacheClearTimeoutMs?: number;
+  readonly testHooks?: BrowserRuntimeTestHooks;
 }
 
 export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, ControlPort {
-  private adapter = new IndexedDbM1bAdapter(DATABASE_NAME);
-  private readonly clientId = crypto.randomUUID();
-  private readonly purgeChannel: BroadcastChannel | null = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1');
+  private readonly adapterFactory: () => RuntimeStoragePort;
+  private adapter: RuntimeStoragePort;
+  private readonly clientId: string;
+  private readonly purgeChannel: BroadcastChannel | null;
+  private readonly serviceFactory: () => InsightServicePort;
+  private readonly notificationPort: RuntimeNotificationPort;
+  private readonly clock: () => number;
+  private readonly scheduler: BrowserRuntimeScheduler;
+  private readonly cacheStore: BrowserRuntimeCacheStore | null;
   private clientRenewal: ReturnType<typeof setInterval> | null = null;
+  private clientRegistered = false;
   private operationGeneration = 0;
   private readonly purgeReleases = new Set<string>();
-  private service = new InsightLoopService();
+  private service: InsightServicePort;
   private imported: ImportCommit | null = null;
   private started = false;
   private closed = false;
+  private runtimeFaulted = false;
   private starting: Promise<void> | null = null;
   private pendingPreview: PendingPreview | null = null;
   private previewing: Promise<ImportCommit> | null = null;
@@ -52,24 +156,60 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private purgeFenceCheck: Promise<boolean> | null = null;
   private closePromise: Promise<void> | null = null;
   private clearPromise: Promise<void> | null = null;
+  private readonly cacheClearTimeoutMs: number;
   private inFlightOperations = 0;
   private readonly operationDrainWaiters = new Set<() => void>();
   private readonly visibilityHandler = () => {
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible') void this.withRuntimeOperation(() => this.catchUpPurgeFence()).catch(() => undefined);
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') this.runBackgroundOperation('visibility-catch-up', () => this.catchUpPurgeFence());
   };
   private lifecycleFrozen = false;
   private readonly freezeHandler = () => { this.lifecycleFrozen = true; };
   private readonly resumeHandler = () => {
     this.lifecycleFrozen = false;
-    void this.withRuntimeOperation(() => this.catchUpPurgeFence()).catch(() => undefined);
+    this.runBackgroundOperation('lifecycle-resume-catch-up', () => this.catchUpPurgeFence());
   };
   private readonly lifecycleHandler = () => {
-    void this.withRuntimeOperation(() => this.catchUpPurgeFence()).catch(() => undefined);
+    this.runBackgroundOperation('lifecycle-catch-up', () => this.catchUpPurgeFence());
   };
-  private rootRegistered = true;
-  private unregisterRuntimeRoot = this.registerRuntimeRoot();
+  private rootRegistered = false;
+  private unregisterRuntimeRoot!: () => void;
+  private readonly testHooks: BrowserRuntimeTestHooks;
+  private readonly purgeMessageHandler = (event: MessageEvent<unknown>) => {
+    const data = decodePurgeChannelMessage(event.data);
+    if (!data) {
+      this.reportBackgroundFailure('purge-channel-protocol', new Error('ERR_PURGE_PROTOCOL_INVALID'));
+      return;
+    }
+    if (data.clientId === this.clientId) return;
+    if (data.type === 'PURGE_REQUEST') {
+      if (this.lifecycleFrozen) return;
+      this.runBackgroundOperation('external-purge-release', () => this.releaseForPurge(data.deletionId, data.generation));
+      return;
+    }
+    if (!this.lifecycleFrozen && this.started && this.inFlightOperations === 0) {
+      void this.withRuntimeOperation(async () => {
+        await this.catchUpPurgeFence();
+        if (!this.closed) this.notifyRuntimeSnapshot(false);
+      }).catch((error) => this.reportBackgroundFailure('state-change-catch-up', error));
+    }
+  };
 
-  constructor(private readonly testHooks: BrowserRuntimeTestHooks = {}) {
+  constructor(options: BrowserInsightRuntimeOptions) {
+    this.testHooks = options.testHooks ?? {};
+    this.adapterFactory = options.adapterFactory;
+    this.serviceFactory = options.serviceFactory;
+    this.notificationPort = options.notificationPort ?? NOOP_RUNTIME_NOTIFICATION_PORT;
+    this.clock = options.clock ?? Date.now;
+    this.scheduler = options.scheduler ?? DEFAULT_RUNTIME_SCHEDULER;
+    this.cacheStore = options.cacheStore === undefined ? defaultCacheStore() : options.cacheStore;
+    this.adapter = this.adapterFactory();
+    this.service = this.serviceFactory();
+    this.clientId = (options.clientIdFactory ?? (() => crypto.randomUUID()))();
+    this.purgeChannel = (options.channelFactory ?? (() => typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1')))();
+    this.cacheClearTimeoutMs = options.cacheClearTimeoutMs ?? CACHE_CLEAR_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.cacheClearTimeoutMs) || this.cacheClearTimeoutMs <= 0) throw new Error('ERR_CACHE_CLEAR_TIMEOUT_INVALID');
+    this.unregisterRuntimeRoot = this.registerRuntimeRoot();
+    this.rootRegistered = true;
     if (typeof document !== 'undefined') {
        document.addEventListener('visibilitychange', this.visibilityHandler);
        document.addEventListener('freeze', this.freezeHandler);
@@ -79,27 +219,16 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
        window.addEventListener('pageshow', this.lifecycleHandler);
        window.addEventListener('focus', this.lifecycleHandler);
      }
-    this.purgeChannel?.addEventListener('message', (event) => {
-      const data = event.data as { type?: string; deletionId?: string; generation?: string; clientId?: string };
-      if (data.clientId === this.clientId) return;
-      if (data.type === 'PURGE_REQUEST' && data.deletionId && data.generation) {
-        if (this.lifecycleFrozen) return;
-        void this.withRuntimeOperation(() => this.releaseForPurge(data.deletionId!, data.generation!)).catch(() => undefined);
-        return;
-      }
-      if (data.type === 'STATE_CHANGED' && !this.lifecycleFrozen) {
-        void this.withRuntimeOperation(async () => {
-          await this.catchUpPurgeFence();
-          if (!this.closed) this.notifyRuntimeSnapshot(false);
-        }).catch(() => undefined);
-      }
-    });
-  }
+    this.purgeChannel?.addEventListener('message', this.purgeMessageHandler);
+
+   }
 
   private async catchUpPurgeFence(): Promise<boolean> {
     if (this.purgeFenceCheck) return this.purgeFenceCheck;
     this.purgeFenceCheck = (async () => {
+      const observedGeneration = this.operationGeneration;
       const { meta, journals } = await this.adapter.readPurgeFence();
+      if (this.closed || observedGeneration !== this.operationGeneration) return false;
       const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
       if (active) {
         await this.releaseForPurge(active.id, active.purge.generation);
@@ -107,8 +236,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       }
       if (meta.recoveryMode !== 'NORMAL') {
         await this.releaseLocalRuntime();
+        if (this.closed) return false;
         this.notifyRuntimeSnapshot(true, meta.observationMode);
         await this.awaitUiPurgeCommit('recovery-only', `${meta.cursor}:${meta.privacyEpoch}`);
+        if (this.closed) return false;
         throw new Error('ERR_PURGE_IN_PROGRESS');
       }
       const previousCursor = this.lastDurableCursor;
@@ -116,8 +247,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const cursorRegressed = previousCursor !== null && BigInt(meta.cursor) < BigInt(previousCursor);
       if (cursorRegressed) {
         await this.releaseLocalRuntime();
+        if (this.closed) return false;
         this.notifyRuntimeSnapshot(true, meta.observationMode);
         await this.awaitUiPurgeCommit('cursor-regression', `${meta.cursor}:${meta.privacyEpoch}`);
+        if (this.closed) return false;
         throw new Error('ERR_CURSOR_CONFLICT');
       }
       const ownCommit = this.ownCommitCursor === meta.cursor;
@@ -132,9 +265,12 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         // A durable purge cursor (or retained watermark) is required before
         // asking the UI to perform the destructive purge handshake.
         await this.releaseLocalRuntime();
+        if (this.closed) return false;
         if (purgeAdvance) await this.awaitUiPurgeCommit(staleWatermark?.deletionId ?? 'cursor-gap', staleWatermark?.generation ?? 'unknown');
+        if (this.closed) return false;
         await this.hydrate();
-        this.notifyRuntimeSnapshot(purgeAdvance, meta.observationMode);
+        if (this.closed) return false;
+        this.notifyRuntimeSnapshot(purgeAdvance, meta.observationMode, Boolean(staleWatermark), Boolean(staleWatermark));
       }
       this.lastDurableCursor = meta.cursor;
       this.lastStorageIncarnation = meta.incarnation ?? null;
@@ -143,20 +279,35 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.purgeFenceCheck;
   }
 
-  private async awaitUiPurgeCommit(deletionId: string, generation: string): Promise<void> {
-    if (typeof window === 'undefined' || !(window as Window & { __proagiPurgeUiBridge?: boolean }).__proagiPurgeUiBridge) return;
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error('ERR_PURGE_UI_UNCONFIRMED')), 2_000);
-      const onCommitted = () => { window.clearTimeout(timer); resolve(); };
-      window.dispatchEvent(new CustomEvent('proagi:external-purge', { detail: { deletionId, generation, onCommitted } }));
-    });
+  private async awaitUiPurgeCommit(deletionId: string, generation: string, source: 'owner' | 'external' = 'external'): Promise<void> {
+    await this.notificationPort.prepareForPurge({ deletionId, generation, external: source === 'external' });
   }
 
-  private notifyRuntimeSnapshot(purge = false, observationMode?: 'ACTIVE' | 'PRIVATE', purgeVerified = false): void {
-    if (typeof window === 'undefined') return;
-    window.dispatchEvent(new CustomEvent('proagi:runtime-snapshot', {
-      detail: { imported: this.imported, observationMode, purge, purgeVerified },
-    }));
+  private notifyRuntimeSnapshot(purge = false, observationMode?: 'ACTIVE' | 'PRIVATE', purgeVerified = false, externalPurge = false): void {
+    const detail: RuntimeSnapshotNotification = { imported: this.imported, observationMode, purge, purgeVerified, externalPurge, runtimeFaulted: this.runtimeFaulted };
+    this.notificationPort.publishSnapshot(detail);
+  }
+
+  private runBackgroundOperation(operation: string, task: () => Promise<unknown>): void {
+    try {
+      void this.withRuntimeOperation(task).catch((error) => this.reportBackgroundFailure(operation, error));
+    } catch (error) {
+      this.reportBackgroundFailure(operation, error);
+    }
+  }
+
+  private async bestEffort(operation: string, task: () => Promise<unknown>): Promise<void> {
+    try { await task(); } catch (error) { this.reportBackgroundFailure(operation, error); }
+  }
+
+  private reportBackgroundFailure(operation: string, error: unknown): void {
+    this.latchRuntimeFault(error);
+    const detail: RuntimeErrorNotification = { operation, code: runtimeErrorCode(error), runtimeFaulted: this.runtimeFaulted };
+    this.notificationPort.publishError(detail);
+  }
+
+  private latchRuntimeFault(error: unknown): void {
+    if (!isBenignRuntimeError(error)) this.runtimeFaulted = true;
   }
 
   private async releaseLocalRuntime(): Promise<void> {
@@ -164,8 +315,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const pending = this.pendingPreview;
     this.pendingPreview = null;
     this.imported = null;
-    this.service = new InsightLoopService();
-    if (pending) await this.adapter.cancelPreview(pending.token).catch(() => undefined);
+    this.service = this.serviceFactory();
+    if (pending) await this.bestEffort('release-runtime-preview-cancel', () => this.adapter.cancelPreview(pending.token));
   }
 
   private async enforcePurgeFence(): Promise<void> {
@@ -179,10 +330,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     try {
       const { meta, journals } = await this.adapter.readPurgeFence();
       const journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
-      if (!journal || journal.state === 'FAILED') {
-        if (!this.closed && meta.recoveryMode === 'NORMAL') this.notifyRuntimeSnapshot(false, meta.observationMode, true);
+      if (!journal) {
+        if (!this.closed && meta.recoveryMode === 'NORMAL' && await this.hasVerifiedPurgeReceipt(deletionId)) this.notifyRuntimeSnapshot(false, meta.observationMode, true, true);
         return;
       }
+      if (journal.state === 'FAILED') return;
       await this.testHooks.beforePurgeRelease?.();
       if (this.closed) return;
       await this.releaseLocalRuntime();
@@ -192,33 +344,50 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const latestJournal = latestFence.journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
       if (latestJournal && !latestJournal.purge.sealedAt) await this.adapter.acknowledgePurge(deletionId, generation, this.clientId);
       const verified = await this.waitForPurgeVerification(deletionId, generation);
-      if (verified && !this.closed) this.notifyRuntimeSnapshot(false, latestFence.meta.observationMode, true);
-    } catch {
+      if (verified && !this.closed) this.notifyRuntimeSnapshot(false, latestFence.meta.observationMode, true, true);
+    } catch (error) {
+      this.reportBackgroundFailure('purge-release', error);
+      // A later lifecycle notification may retry the same generation. The
+      // durable journal/receipt, rather than this in-memory guard, is the
+      // idempotency authority.
+    } finally {
       this.purgeReleases.delete(releaseKey);
     }
   }
 
   private async waitForPurgeVerification(deletionId: string, generation: string): Promise<boolean> {
-    const deadline = Date.now() + 10_000;
-    while (!this.closed && Date.now() < deadline) {
+    const deadline = this.clock() + 10_000;
+    while (!this.closed && this.clock() < deadline) {
       const fence = await this.adapter.readPurgeFence();
-      const active = fence.journals.some((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
-      if (!active && fence.meta.recoveryMode === 'NORMAL') return true;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const active = fence.journals.find((item) => item.recordType === 'active_deletion_journal' && item.id === deletionId && item.purge.generation === generation);
+      if (active?.state === 'FAILED') return false;
+      if (!active && fence.meta.recoveryMode === 'NORMAL') return this.hasVerifiedPurgeReceipt(deletionId);
+      await new Promise((resolve) => this.scheduler.setTimeout(resolve, 100));
     }
     return false;
   }
 
-  async start(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.startInternal()); }
+  private async hasVerifiedPurgeReceipt(deletionId: string): Promise<boolean> {
+    try {
+      await this.adapter.verifyDeletion(deletionId, this.clientId, '');
+      return true;
+    } catch (error) {
+      if (runtimeErrorCode(error) === 'ERR_DELETION_STATE') return false;
+      throw error;
+    }
+  }
+
+  async start(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.startInternal(), true); }
 
   private async startInternal(): Promise<BrowserRuntimeSnapshot> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
     if (!this.started) {
       this.starting ??= (async () => {
-        const startGeneration = this.operationGeneration;
+        try {
+        let expectedGeneration = this.operationGeneration;
         const assertOpen = () => {
           if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
-          if (startGeneration !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
+          if (expectedGeneration !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
         };
         if (!this.rootRegistered) {
           this.unregisterRuntimeRoot = this.registerRuntimeRoot();
@@ -227,19 +396,21 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         await this.adapter.open();
         assertOpen();
         const registration = await this.adapter.registerClient(this.clientId);
+        this.clientRegistered = true;
         assertOpen();
         const { meta, journals } = await this.adapter.readPurgeFence();
         assertOpen();
         const failed = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state === 'FAILED');
         if (failed) {
-          await this.adapter.closeClient(this.clientId).catch(() => undefined);
+          await this.bestEffort('close-client-after-start-failure', () => this.adapter.closeClient(this.clientId));
+          this.clientRegistered = false;
           throw new Error('ERR_RECOVERY_FAILED');
         }
-        this.clientRenewal ??= setInterval(() => { void this.withRuntimeOperation(() => this.adapter.renewClient(this.clientId)).catch(() => undefined); }, 2_000);
+        this.clientRenewal ??= this.scheduler.setInterval(() => { this.runBackgroundOperation('client-lease-renewal', () => this.adapter.renewClient(this.clientId)); }, 2_000);
         if (registration.state === 'QUARANTINED') {
           const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
           this.imported = null;
-          this.service = new InsightLoopService();
+          this.service = this.serviceFactory();
           this.lastDurableCursor = meta.cursor;
           this.lastStorageIncarnation = meta.incarnation ?? null;
           if (active && !active.purge.sealedAt) {
@@ -251,11 +422,26 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
           }
         } else {
           const purgeActive = await this.catchUpPurgeFence();
+          // Catch-up may intentionally advance the runtime generation while
+          // releasing stale local state. Continue under that new generation;
+          // only close or an unrelated mutation remains stale.
+          expectedGeneration = this.operationGeneration;
           assertOpen();
-          if (!purgeActive) await this.hydrate(0, startGeneration);
+          if (!purgeActive) await this.hydrate(0, expectedGeneration);
         }
         assertOpen();
         this.started = true;
+        } catch (error) {
+          if (this.clientRenewal) this.scheduler.clearInterval(this.clientRenewal);
+          this.clientRenewal = null;
+          if (this.clientRegistered) {
+            await this.bestEffort('close-client-after-start-failure', () => this.adapter.closeClient(this.clientId));
+            this.clientRegistered = false;
+          }
+          this.imported = null;
+          this.service = this.serviceFactory();
+          throw error;
+        }
       })().finally(() => { this.starting = null; });
       await this.starting;
     }
@@ -267,18 +453,18 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.operationGeneration += 1;
     this.pendingPreview = null;
     this.imported = null;
-    this.service = new InsightLoopService();
+    this.service = this.serviceFactory();
   }
 
   private registerRuntimeRoot(): () => void {
     return this.adapter.registerInProcessRoot('application.runtime', () => [
-      this.imported, this.service.knowledge.snapshot(), this.pendingPreview?.commit,
+      this.imported, this.service.knowledgeSnapshot(), this.pendingPreview?.commit,
     ], { freeze: () => this.freezeRuntimeRoot(), unfreeze: () => undefined });
   }
 
   currentClaim(): WorkModelClaim | null {
     const claimKey = this.imported?.output.claims[0]?.claimKey;
-    return claimKey ? (this.service.knowledge.currentClaim(claimKey) ?? null) : null;
+    return claimKey ? (this.service.currentClaim(claimKey) ?? null) : null;
   }
 
   async preview(): Promise<ObservationPreviewDTO> {
@@ -328,9 +514,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     });
   }
 
-  async previewBundled(now = Date.now()): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.previewBundledInternal(now)); }
+  async previewBundled(now = this.clock()): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.previewBundledInternal(now)); }
 
-  private async previewBundledInternal(now = Date.now()): Promise<ImportCommit> {
+  private async previewBundledInternal(now = this.clock()): Promise<ImportCommit> {
     await this.start();
     await this.enforcePurgeFence();
     if (this.imported) return this.imported;
@@ -344,7 +530,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const meta = await this.adapter.getMeta();
     if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
     if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
-    const candidate = new InsightLoopService();
+    const candidate = this.serviceFactory();
     const preview = candidate.preview(developerDayFixtureJson, now);
     const receipt = await candidate.commit(preview.token, crypto.randomUUID(), now);
     const idempotencyKey = crypto.randomUUID();
@@ -354,7 +540,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       expiresAt: new Date(now + 60_000).toISOString(),
     });
     if (generation !== this.operationGeneration) {
-      await this.adapter.cancelPreview(staged.token).catch(() => undefined);
+      await this.bestEffort('stale-preview-cancel', () => this.adapter.cancelPreview(staged.token));
       throw new Error('ERR_OPERATION_STALE');
     }
     const records = recordsForCommit(receipt.result, now);
@@ -374,7 +560,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       }
       return receipt.result;
     } catch (error) {
-      await this.adapter.cancelPreview(staged.token).catch(() => undefined);
+      await this.bestEffort('stale-preview-cancel', () => this.adapter.cancelPreview(staged.token));
       throw error;
     }
   }
@@ -409,7 +595,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
           this.ownCommitCursor = committedCursor;
         } catch (retryError) {
           this.pendingPreview = null;
-          throw retryError;
+          throw new Error('ERR_COMMIT_RECONCILIATION_INVALID', { cause: retryError });
         }
       }
       this.purgeChannel?.postMessage({ type: 'STATE_CHANGED', clientId: this.clientId });
@@ -421,7 +607,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const committedMeta = await this.adapter.getMeta();
       if (committedCursor === undefined || committedMeta.cursor !== committedCursor || committedMeta.privacyEpoch !== pending.batch.expectedPrivacyEpoch || committedMeta.recoveryMode !== 'NORMAL') {
         this.pendingPreview = null;
-        await this.hydrate(0, generation).catch(() => undefined);
+        await this.bestEffort('runtime-rehydrate', () => this.hydrate(0, generation));
         throw new Error(committedMeta.recoveryMode === 'NORMAL' ? 'ERR_CURSOR_CONFLICT' : 'ERR_PURGE_IN_PROGRESS');
       }
       await this.enforcePurgeFence();
@@ -455,7 +641,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
   }
 
-  async importBundled(now = Date.now()): Promise<ImportCommit> {
+  async importBundled(now = this.clock()): Promise<ImportCommit> {
     return this.withRuntimeOperation(async () => {
       await this.previewBundled(now);
       return this.commitBundled();
@@ -501,7 +687,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         await this.deleteClaimLineage(current);
         return result;
       } catch (error) {
-        if (!this.closed && generation === this.operationGeneration) await this.hydrate(0, generation).catch(() => undefined);
+        if (!this.closed && generation === this.operationGeneration) await this.bestEffort('runtime-rehydrate', () => this.hydrate(0, generation));
         if (!deleteRetried && (error as { code?: string }).code === 'ERR_CURSOR_CONFLICT') { deleteRetried = true; await this.deleteClaimLineage(current); return result; }
         throw error;
       }
@@ -510,7 +696,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     try {
       if (generation !== this.operationGeneration || this.closed) throw new Error('ERR_OPERATION_STALE');
       if (!result.claim || !result.head) throw new Error('ERR_KNOWLEDGE_LINEAGE');
-      const version = correctionService.knowledge.snapshot().versions.find((item) => item.id === result.head!.versionId);
+      const version = correctionService.knowledgeSnapshot().versions.find((item) => item.id === result.head!.versionId);
       if (!version) throw new Error('ERR_KNOWLEDGE_LINEAGE');
       const records = [
         toStoredRecord(result.record.id, 'correction_record_v1', result.record),
@@ -531,6 +717,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const commitResult = await this.adapter.commit(batch);
        if (generation !== this.operationGeneration || this.closed) throw new Error('ERR_OPERATION_STALE');
        const durableMeta = await this.adapter.getMeta();
+       this.purgeChannel?.postMessage({ type: 'STATE_CHANGED', clientId: this.clientId });
        const durableHead = await this.adapter.getRecord<StoredRecord>('heads', headRecord.recordId);
        if (durableMeta.cursor !== commitResult.cursor || durableMeta.privacyEpoch !== metaBeforeCorrection.privacyEpoch || durableMeta.recoveryMode !== 'NORMAL' || durableHead?.contentHash !== headRecord.contentHash) {
          await this.hydrate(0, generation);
@@ -548,75 +735,84 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
          releaseMutation();
        }
      } catch (error) {
-      if (!this.closed && generation === this.operationGeneration) await this.hydrate(0, generation).catch(() => undefined);
+      if (!this.closed && generation === this.operationGeneration) await this.bestEffort('runtime-rehydrate', () => this.hydrate(0, generation));
       throw error;
     }
   }
 
   private async deleteClaimLineage(claim: WorkModelClaim): Promise<void> {
     const lineageAnchors = await this.collectClaimLineageAnchors(claim.claimKey);
-    const target = await this.adapter.getRecord('business', claim.id) as StoredRecord | undefined;
-    const storedClaim = target?.payload as WorkModelClaim | undefined;
+    const target = await this.adapter.getRecord<StoredRecord>('business', claim.id);
+    const storedClaim = target ? decodeWorkModelClaim(target.payload) : undefined;
     if (!target || storedClaim?.contentHash !== claim.contentHash) throw new Error('ERR_NOT_FOUND');
     const plan = await this.adapter.planDeletion({
       storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType,
       lineageAnchorDigests: lineageAnchors.map((anchor) => sha256(anchor)),
     });
     const ownerClientId = crypto.randomUUID();
-    const startedAt = Date.now();
+    const startedAt = this.clock();
     const fenced = await this.adapter.fenceDeletion(plan, ownerClientId, startedAt);
     let journal = fenced.journal;
     while (journal.state === 'FENCED') {
-      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
-      journal = await this.adapter.enumerateDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      journal = await this.adapter.enumerateDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
     }
     while (journal.state === 'DELETING') {
-      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
-      journal = await this.adapter.deleteChunk(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      journal = await this.adapter.deleteChunk(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
     }
 
     if (this.imported) this.imported = withoutClaim(this.imported, claim, lineageAnchors);
-    this.service = new InsightLoopService();
-    await this.awaitUiPurgeCommit(journal.id, journal.purge.generation);
+    this.service = this.serviceFactory();
+    await this.awaitUiPurgeCommit(journal.id, journal.purge.generation, 'owner');
     if (journal.state === 'PURGE_PENDING') {
-      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
       this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
-      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
+      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, this.clock());
       if (!this.purgeChannel && journal.purge.requiredClientIds.some((clientId) => clientId !== this.clientId)) {
         throw new Error('ERR_PURGE_CLIENTS_PENDING');
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => this.scheduler.setTimeout(resolve, 100));
     }
-    let audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
-    const waitUntil = Date.now() + 5_000;
-    while (audit.outcome === 'CLIENTS_PENDING' && Date.now() < waitUntil) {
-      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
-      this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+    let audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
+    const waitStarted = this.clock();
+    const waitUntil = waitStarted + PURGE_CLIENT_WAIT_MS;
+    let purgeRetried = false;
+    while (audit.outcome === 'CLIENTS_PENDING' && this.clock() < waitUntil) {
+      const now = this.clock();
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, now);
+      if (!purgeRetried && now - waitStarted >= PURGE_CLIENT_LEASE_MS) {
+        journal = await this.adapter.retryPurge(journal.id, ownerClientId, fenced.lease.fencingToken, [this.clientId], now);
+        purgeRetried = true;
+        this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+        if (journal.purge.requiredClientIds.includes(this.clientId)) await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, now);
+      } else {
+        this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+      }
+      await new Promise((resolve) => this.scheduler.setTimeout(resolve, 250));
+      audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
     }
     if (audit.outcome !== 'CLEAN') {
       const roots = audit.receipts.filter((receipt) => receipt.forbiddenReferenceCount > 0)
         .map((receipt) => receipt.rootId.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()).join('_');
       throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : `ERR_DELETE_REACHABLE_${roots || 'UNKNOWN'}`);
     }
-    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
+    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
     while (!finalizing.finalizing.complete) {
-      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, Date.now());
-      finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, Date.now());
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
     }
     try {
-      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock(), this.testHooks.simulateDeletionResponseLoss?.() === true);
     } catch (error) {
       if (!(error instanceof CommitResponseLostError)) throw error;
       // The transaction is already committed. Re-read the authenticated
       // terminal receipt instead of reporting a false delete failure.
-      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, Date.now());
+      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
     }
     await this.hydrate(0, this.operationGeneration);
     const verifiedMeta = await this.adapter.getMeta();
     this.lastDurableCursor = verifiedMeta.cursor;
-    this.notifyRuntimeSnapshot(false, verifiedMeta.observationMode, true);
   }
 
   private async collectClaimLineageAnchors(claimKey: string): Promise<readonly string[]> {
@@ -626,7 +822,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return [...new Set(lineageRecords.flatMap(identityAnchors))].sort();
   }
 
-  async clear(): Promise<void> { return this.withRuntimeOperation(() => this.clearInternal()); }
+  async clear(): Promise<void> { return this.withRuntimeOperation(() => this.clearInternal(), true); }
 
   private async clearInternal(): Promise<void> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
@@ -634,11 +830,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.clearPromise = (async () => {
       await this.start();
       if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
-      const cachesCleared = await clearControlledCaches();
+      const cachesCleared = await clearControlledCaches(this.cacheClearTimeoutMs, this.cacheStore, this.scheduler);
       const cleared = await this.adapter.clearAll({ cachesCleared });
       if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
       if (cleared.state !== 'SUCCEEDED') {
-        await this.hydrate().catch(() => undefined);
+        await this.bestEffort('clear-rehydrate', () => this.hydrate());
         throw new Error('ERR_CLEAR_BLOCKED');
       }
       if (this.rootRegistered) {
@@ -646,56 +842,67 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         this.rootRegistered = false;
       }
       this.adapter.dispose();
-      this.adapter = new IndexedDbM1bAdapter(DATABASE_NAME);
+      this.clientRegistered = false;
+      this.adapter = this.adapterFactory();
       this.unregisterRuntimeRoot = this.registerRuntimeRoot();
       this.rootRegistered = true;
       this.started = false;
-      this.service = new InsightLoopService();
+      this.service = this.serviceFactory();
       this.imported = null;
       this.pendingPreview = null;
       this.lastDurableCursor = null;
       this.lastStorageIncarnation = null;
       if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
       await this.start();
-    })().finally(() => { this.clearPromise = null; });
+    await this.clearRuntimeFaultAfterVerifiedRecovery();
+     })().finally(() => { this.clearPromise = null; });
     return this.clearPromise;
   }
 
-  async recover(): Promise<void> { return this.withRuntimeOperation(() => this.recoverInternal()); }
+  async recover(): Promise<void> { return this.withRuntimeOperation(() => this.recoverInternal(), true); }
+
+  private async clearRuntimeFaultAfterVerifiedRecovery(purge = false): Promise<void> {
+    const snapshot = await this.snapshotInternal();
+    this.runtimeFaulted = false;
+    this.notifyRuntimeSnapshot(purge, snapshot.observationMode);
+  }
 
   private async recoverInternal(): Promise<void> {
     await this.start();
     const { journals } = await this.adapter.readPurgeFence();
     let journal = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
-    if (!journal) return;
+    if (!journal) {
+      await this.clearRuntimeFaultAfterVerifiedRecovery();
+      return;
+    }
     await this.releaseLocalRuntime();
-    await this.awaitUiPurgeCommit(journal.id, journal.purge.generation);
-    const lease = await this.adapter.stealRecoveryLease(this.clientId, Date.now());
+    await this.awaitUiPurgeCommit(journal.id, journal.purge.generation, 'owner');
+    const lease = await this.adapter.stealRecoveryLease(this.clientId, this.clock());
     while (journal.state === 'FENCED' || journal.state === 'DELETING') {
-      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, this.clock());
       journal = journal.state === 'FENCED'
-        ? await this.adapter.enumerateDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now())
-        : await this.adapter.deleteChunk(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+        ? await this.adapter.enumerateDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, this.clock())
+        : await this.adapter.deleteChunk(journal.id, this.clientId, lease.fencingToken, 128, this.clock());
     }
     if (journal.state === 'PURGE_PENDING') {
-      journal = await this.adapter.retryPurge(journal.id, this.clientId, lease.fencingToken, [], Date.now());
+      journal = await this.adapter.retryPurge(journal.id, this.clientId, lease.fencingToken, [], this.clock());
       this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
-      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, Date.now());
+      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, this.clock());
     }
     if (journal.state === 'PURGE_PENDING' || journal.state === 'AUDITING') {
-      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
-      const audit = await this.adapter.sealAndAudit(journal.id, this.clientId, lease.fencingToken, Date.now());
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, this.clock());
+      const audit = await this.adapter.sealAndAudit(journal.id, this.clientId, lease.fencingToken, this.clock());
       if (audit.outcome !== 'CLEAN') throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : 'ERR_DELETE_REACHABLE');
     }
-    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, this.clock());
     while (!finalizing.finalizing.complete) {
-      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
-      finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, Date.now());
+      await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, this.clock());
+      finalizing = await this.adapter.finalizeDeletionPage(journal.id, this.clientId, lease.fencingToken, 128, this.clock());
     }
-    await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, Date.now());
-    await this.adapter.verifyDeletion(journal.id, this.clientId, lease.fencingToken, Date.now());
+    await this.adapter.renewRecoveryLease(this.clientId, lease.fencingToken, this.clock());
+    await this.adapter.verifyDeletion(journal.id, this.clientId, lease.fencingToken, this.clock());
     await this.hydrate();
-    this.notifyRuntimeSnapshot(true);
+    await this.clearRuntimeFaultAfterVerifiedRecovery(true);
   }
 
   async replay() { return this.withRuntimeOperation(() => this.replayInternal()); }
@@ -707,7 +914,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.service.replay();
   }
 
-  async snapshot(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.snapshotInternal()); }
+  async snapshot(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.snapshotInternal(), true); }
 
   private async snapshotInternal(): Promise<BrowserRuntimeSnapshot> {
     await this.start();
@@ -717,20 +924,27 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
 
   private async readSnapshot(): Promise<BrowserRuntimeSnapshot> {
     const meta = await this.adapter.getMeta();
-    return { observationMode: meta.observationMode, cursor: meta.cursor, privacyEpoch: meta.privacyEpoch, imported: this.imported };
+    return { observationMode: meta.observationMode, cursor: meta.cursor, privacyEpoch: meta.privacyEpoch, imported: this.imported, runtimeFaulted: this.runtimeFaulted };
   }
 
-  private withRuntimeOperation<T>(operation: () => Promise<T>): Promise<T> {
+  private withRuntimeOperation<T>(operation: () => Promise<T>, allowFaulted = false): Promise<T> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
+    if (this.runtimeFaulted && !allowFaulted) throw new Error('ERR_RUNTIME_FAULTED');
     this.inFlightOperations += 1;
     let result: Promise<T>;
     try {
       result = operation();
     } catch (error) {
       this.releaseRuntimeOperation();
+      this.latchRuntimeFault(error);
       throw error;
     }
-    return result.finally(() => this.releaseRuntimeOperation());
+    return result
+      .catch((error) => {
+        this.latchRuntimeFault(error);
+        throw error;
+      })
+      .finally(() => this.releaseRuntimeOperation());
   }
 
   private releaseRuntimeOperation(): void {
@@ -752,11 +966,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.closed = true;
     this.operationGeneration += 1;
     this.imported = null;
-    this.service = new InsightLoopService();
+    this.service = this.serviceFactory();
     // Keep the closed root harmless until adapter disposal can detach it. If a
     // final verification owns quiescence, disposal is deferred by the adapter.
     this.rootRegistered = false;
-    if (this.clientRenewal) clearInterval(this.clientRenewal);
+    if (this.clientRenewal) this.scheduler.clearInterval(this.clientRenewal);
     this.clientRenewal = null;
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
@@ -767,21 +981,24 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       window.removeEventListener('pageshow', this.lifecycleHandler);
       window.removeEventListener('focus', this.lifecycleHandler);
     }
+    this.purgeChannel?.removeEventListener('message', this.purgeMessageHandler);
     this.purgeChannel?.close();
     const adapter = this.adapter;
     const pending = this.pendingPreview;
     this.pendingPreview = null;
     const startup = this.starting;
     const clearing = this.clearPromise;
-    const shouldCloseClient = this.started || Boolean(startup);
     const operations = this.waitForRuntimeOperations();
     this.started = false;
     this.closePromise = (async () => {
-      await startup?.catch(() => undefined);
-      await clearing?.catch(() => undefined);
+      await startup?.catch((error) => this.reportBackgroundFailure('close-startup', error));
+      await clearing?.catch((error) => this.reportBackgroundFailure('close-clearing', error));
       await operations;
-      if (pending) await adapter.cancelPreview(pending.token).catch(() => undefined);
-      if (shouldCloseClient) await adapter.closeClient(this.clientId).catch(() => undefined);
+      if (pending) await this.bestEffort('close-preview-cancel', () => adapter.cancelPreview(pending.token));
+      if (this.clientRegistered) {
+        await this.bestEffort('close-client', () => adapter.closeClient(this.clientId));
+        this.clientRegistered = false;
+      }
       adapter.dispose();
     })();
     return this.closePromise;
@@ -796,27 +1013,30 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       return;
     }
     if (this.closed || generation !== this.operationGeneration) return;
-    const marker = records.find((record) => record.recordId === FIXTURE_MARKER_ID) as StoredRecord<FixtureMarker> | undefined;
-    const service = new InsightLoopService();
-    service.restoreEvents(records.filter((record) => record.recordType === 'behavior_event_v1').map((record) => record.payload as BehaviorEvent));
+    const events = records.filter((record) => record.recordType === 'behavior_event_v1').map((record) => decodeBehaviorEvent(record.payload));
+    const claims = records.filter((record) => record.recordType === 'work_model_claim_v1').map((record) => decodeWorkModelClaim(record.payload));
+    const versions = records.filter((record) => record.recordType === 'knowledge_version_v1').map((record) => decodeKnowledgeVersion(record.payload));
+    const corrections = records.filter((record) => record.recordType === 'correction_record_v1').map((record) => decodeCorrectionRecord(record.payload));
+    const heads = headRecords.map((record) => decodeKnowledgeHead(record.payload));
+    const markerRecord = records.find((record) => record.recordId === FIXTURE_MARKER_ID);
+    const marker = markerRecord ? decodeFixtureMarker(markerRecord.payload) : undefined;
+    const service = this.serviceFactory();
+    service.restoreEvents(events);
     let imported: ImportCommit | null = null;
     if (marker) {
-      const asOf = marker.payload.asOf;
+      const asOf = marker.asOf;
       const preview = service.preview(developerDayFixtureJson, asOf);
-      const receipt = await service.commit(preview.token, `hydrate:${marker.contentHash}`, asOf);
-      const claims = records.filter((record) => record.recordType === 'work_model_claim_v1').map((record) => record.payload as WorkModelClaim);
-      const versions = records.filter((record) => record.recordType === 'knowledge_version_v1').map((record) => record.payload as KnowledgeVersion);
-      const corrections = records.filter((record) => record.recordType === 'correction_record_v1').map((record) => record.payload as CorrectionRecord);
+      const receipt = await service.commit(preview.token, `hydrate:${markerRecord!.contentHash}`, asOf);
       const hasStoredClaim = claims.length > 0;
       const base = receipt.result.output.claims[0];
       const snapshot: KnowledgeSnapshot = {
         claims,
-        heads: headRecords.map((record) => record.payload as KnowledgeHead),
+        heads,
         versions,
         corrections,
         deletedClaimKeys: !hasStoredClaim && base ? [base.claimKey] : [],
       };
-      service.knowledge.hydrate(snapshot);
+      service.hydrateKnowledge(snapshot);
       imported = !hasStoredClaim && base ? withoutClaim(receipt.result, base) : receipt.result;
     }
     if (generation !== this.operationGeneration) return;
@@ -866,6 +1086,55 @@ const LINEAGE_IDENTITY_FIELDS = [
   'versionId', 'basedOnVersionId', 'causedByCorrectionId',
 ] as const;
 
+function runtimeErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  return /^ERR_[A-Z0-9_]+$/.test(message) ? message : 'ERR_RUNTIME_BACKGROUND';
+}
+
+type RuntimeErrorDisposition = 'expected' | 'fault';
+
+const RUNTIME_ERROR_DISPOSITION: Readonly<Record<string, RuntimeErrorDisposition>> = Object.freeze({
+  ERR_RUNTIME_CLOSED: 'expected',
+  ERR_RUNTIME_FAULTED: 'expected',
+  ERR_OPERATION_STALE: 'expected',
+  ERR_NOT_FOUND: 'expected',
+  ERR_PREVIEW_REQUIRED: 'expected',
+  ERR_PREVIEW_STALE: 'expected',
+  ERR_PREVIEW_INVALID: 'expected',
+  ERR_PREVIEW_RETRY_INVALID: 'fault',
+  ERR_COMMIT_RECONCILIATION_INVALID: 'fault',
+  ERR_PREVIEW_BUFFER_MISSING: 'expected',
+  ERR_PRIVACY_MODE: 'expected',
+  ERR_PRIVACY_MODE_ACTIVE: 'expected',
+  ERR_PURGE_IN_PROGRESS: 'expected',
+  ERR_PURGE_CLIENTS_PENDING: 'expected',
+  ERR_PURGE_GENERATION_STALE: 'expected',
+  ERR_PURGE_SEALED: 'expected',
+  ERR_PURGE_SEALED_RETRY: 'expected',
+  ERR_PURGE_CLIENT_UNKNOWN: 'expected',
+  ERR_DELETION_STATE: 'expected',
+  ERR_CURSOR_CONFLICT: 'expected',
+  ERR_PRIVACY_EPOCH_STALE: 'expected',
+  ERR_IMPORT_SESSION_STATE: 'expected',
+  ERR_PROJECTION_STALE: 'expected',
+  ERR_IDEMPOTENCY_CONFLICT: 'expected',
+  ERR_PREVIEW_CONSUMED: 'expected',
+  ERR_PREVIEW_EXPIRED: 'expected',
+  ERR_PREVIEW_INPUT_MISMATCH: 'expected',
+  ERR_PREVIEW_BATCH_MISMATCH: 'expected',
+  ERR_RECOVERY_REQUIRED: 'expected',
+  ERR_CLIENT_NOT_REGISTERED: 'expected',
+  ERR_CLIENT_CLOSING: 'expected',
+  ERR_RECOVERY_LEASE_HELD: 'expected',
+  ERR_QUOTA_LOGICAL: 'expected',
+  ERR_CHUNK_LIMIT: 'expected',
+  ERR_BATCH_LIMIT: 'expected',
+});
+
+function isBenignRuntimeError(error: unknown): boolean {
+  return RUNTIME_ERROR_DISPOSITION[runtimeErrorCode(error)] === 'expected';
+}
+
 function recordTargetsClaimKey(record: StoredRecord, claimKey: string): boolean {
   if (!record.payload || typeof record.payload !== 'object') return false;
   const payload = record.payload as Record<string, unknown>;
@@ -900,14 +1169,30 @@ function withoutClaim(commit: ImportCommit, claim: WorkModelClaim, lineageAnchor
   });
 }
 
-async function clearControlledCaches(): Promise<boolean> {
-  if (!('caches' in globalThis)) return true;
+async function clearControlledCaches(
+  timeoutMs = CACHE_CLEAR_TIMEOUT_MS,
+  storage: BrowserRuntimeCacheStore | null = defaultCacheStore(),
+  scheduler: BrowserRuntimeScheduler = DEFAULT_RUNTIME_SCHEDULER,
+): Promise<boolean> {
+  if (!storage) return true;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return false;
+  let timedOut = false;
+  const operation = (async () => {
+    try {
+      const keys = await storage.keys();
+      await Promise.all(keys.map((key) => storage.delete(key)));
+      return (await storage.keys()).length === 0;
+    } catch {
+      return false;
+    }
+  })().then((result) => timedOut ? false : result);
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timeoutHandle = scheduler.setTimeout(() => { timedOut = true; resolve(false); }, timeoutMs);
+  });
   try {
-    const storage = globalThis.caches;
-    const keys = await storage.keys();
-    await Promise.all(keys.map((key) => storage.delete(key)));
-    return (await storage.keys()).length === 0;
-  } catch {
-    return false;
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutHandle) scheduler.clearTimeout(timeoutHandle);
   }
 }

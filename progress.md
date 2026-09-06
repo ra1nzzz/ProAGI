@@ -384,3 +384,12 @@
 - 增加 privacy atomic writer/hash/mutation regressions；privacy 15/15、integration 13/13、typecheck/lint 通过。
 - 增加 durable watermark Playwright 2/2；加强缺 ACK/required membership 与 pre-thaw completion assertions，cross-tab Playwright 2/2。
 - planning session-catchup 脚本路径不存在（已记录于 `task_plan.md`）；尚未执行最终 YT review 结论与 release gate、commit/push。
+
+## Final Hardening / Goal Round 8 continuation
+
+- 完成三维最终 YT review 与六类盲区复查：A/B/C 均为 0 P0、0 P1。
+- Runtime 改为由外层 `browserRuntimeComposition` 工厂注入 storage/service；应用 storage contracts 与 adapter/browser 解耦，并加入 import-boundary gate。
+- Runtime fault latch 由应用层拥有；UI 在 preview/commit/correction/replay/privacy 失败后回读 fault snapshot，response-loss reconciliation 的任意重试失败统一转换为 `ERR_COMMIT_RECONCILIATION_INVALID` 并保留 cause。
+- 验证器 registry 为每个命令配置超时与 TERM→KILL process-group 清理；GitHub Actions artifact retention 统一限制为 90 天，release candidate 仍要求真实 semver tag 与 clean HEAD。
+- 最终 PR gate：98/98 Vitest、26/26 Chromium、2/2 smoke、release gates 9/9、CSP/audit/build/production artifact 全部通过；nightly tier 13/13 命令通过（privacy 26/26、worker 7/7）。
+- Release tier 前 13 个命令已通过；第 14 个 release binding 因当前 checkout 无 `RELEASE_TARGET_SHA`/semver tag 而按设计拒绝，待真实 tag CI 运行；本轮最终原子 commit/push 作为交付动作。

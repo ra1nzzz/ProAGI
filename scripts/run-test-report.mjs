@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
-import { validateStructuredReport } from './check-suites.mjs';
+import { validateStructuredReport, VERIFICATION_REGISTRY } from './check-suites.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -59,17 +59,9 @@ if (runner === 'vitest') {
 }
 const result = await run(executable, args, env);
 if (result.code !== 0) throw new Error(`${runner} exited with ${result.code ?? `signal ${result.signal}`}`);
-const expectedSuites = lane === 'pr-vitest'
-  ? ['unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker', 'projection', 'evaluator', 'a11y', 'visual']
-  : lane === 'nightly-privacy' ? ['privacy'] : lane === 'nightly-worker' ? ['worker'] : lane === 'pr-e2e' ? ['e2e'] : [];
-const reportOptions = runner === 'playwright'
-  ? {
-      requiredProjects: ['chromium-desktop', 'chromium-320'],
-      ...(lane === 'pr-e2e' ? { requireAllE2E: true } : {}),
-      ...(lane === 'pr-smoke' ? {
-        expectedSpecs: [{ file: 'tests/e2e/app.spec.ts', title: 'renders the canonical AppShell order and eight-part Orb' }],
-      } : {}),
-    }
-  : {};
+const laneSpec = VERIFICATION_REGISTRY.lanes[lane];
+if (!laneSpec || laneSpec.runner !== runner) throw new Error(`Lane ${lane} is not registered for ${runner}`);
+const expectedSuites = laneSpec.suites;
+const reportOptions = laneSpec.options ?? {};
 const summary = await validateStructuredReport(reportPath, runner, repoRoot, expectedSuites, reportOptions);
 console.log(`Trusted structured report: ${JSON.stringify(summary)}`);

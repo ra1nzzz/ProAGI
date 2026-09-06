@@ -1,5 +1,8 @@
 import { hashCanonical, sha256 } from '../domain/canonical';
 import type { Hash } from '../domain/types';
+import type { RuntimeStoragePort } from '../application/storagePort';
+import { toStoredRecord } from '../application/storageContracts';
+export { makeBatch, toStoredRecord } from '../application/storageContracts';
 import {
   CommitResponseLostError,
   M1bError,
@@ -31,11 +34,13 @@ import {
   type StoredRecord,
 } from './m1bTypes';
 
-const DB_VERSION = 3;
+const DB_VERSION = 4;
+const OPEN_TIMEOUT_MS = 5_000;
 const NORMAL_WRITE_LIMIT = 100 * 1024 * 1024;
 const PREVIEW_RECEIPT_RETENTION_MS = 10 * 60 * 1000;
 const RECOVERY_RESERVE = 5 * 1024 * 1024;
 const LEASE_MS = 6_000;
+const QUIESCENCE_DRAIN_TIMEOUT_MS = 10_000;
 const ROOT_STORES: readonly PhysicalStoreName[] = ['meta', ...STORE_NAMES];
 
 interface BufferedPreview {
@@ -79,6 +84,7 @@ interface RootCoordinator {
   readonly adapters: Set<IndexedDbM1bAdapter>;
   readonly deferredDisposals: Set<IndexedDbM1bAdapter>;
   readonly mutationWaiters: Set<() => void>;
+  databaseDeletionPending?: Promise<boolean>;
   quiescence: RootQuiescence | null;
 }
 
@@ -94,7 +100,7 @@ function rootCoordinatorFor(databaseName: string): RootCoordinator {
 }
 
 function maybeDropRootCoordinator(databaseName: string, coordinator: RootCoordinator): void {
-  if (coordinator.adapterRefs === 0 && coordinator.roots.size === 0 && coordinator.quiescence === null && coordinator.activeMutations === 0 && coordinator.deferredDisposals.size === 0 && rootCoordinators.get(databaseName) === coordinator) rootCoordinators.delete(databaseName);
+  if (coordinator.adapterRefs === 0 && coordinator.roots.size === 0 && coordinator.quiescence === null && coordinator.activeMutations === 0 && coordinator.deferredDisposals.size === 0 && coordinator.databaseDeletionPending === undefined && rootCoordinators.get(databaseName) === coordinator) rootCoordinators.delete(databaseName);
 }
 
 function sweepConsumedPreviewRecords(store: IDBObjectStore, records: readonly unknown[], now: number): void {
@@ -105,7 +111,14 @@ function sweepConsumedPreviewRecords(store: IDBObjectStore, records: readonly un
     const record = value as Record<string, unknown>;
     if (record.recordType === 'preview_commit_guard' && record.state === 'CONSUMED' && typeof record.recordId === 'string' && typeof record.writtenAt === 'string' && Date.parse(record.writtenAt) <= cutoff) {
       if (typeof record.receiptId === 'string') receiptIds.add(record.receiptId);
-      store.delete(record.recordId);
+      const tokenHash = typeof record.tokenHash === 'string' ? record.tokenHash : record.recordId.startsWith('preview-guard:') ? record.recordId.slice('preview-guard:'.length) : undefined;
+      // Retain a compact, authenticated token tombstone when the bulky guard
+      // and receipt expire. Known tokens must never become reusable.
+      if (tokenHash && /^sha256:[0-9a-f]{64}$/.test(tokenHash)) {
+        const tombstoneBase = { recordId: `preview-token-tombstone:${tokenHash}`, recordType: 'preview_token_tombstone', writtenAt: record.writtenAt, tokenHash, consumedAt: record.writtenAt };
+        store.put({ ...tombstoneBase, contentHash: hashCanonical(tombstoneBase) });
+        store.delete(record.recordId);
+      }
     }
   }
   for (const value of records) {
@@ -116,13 +129,13 @@ function sweepConsumedPreviewRecords(store: IDBObjectStore, records: readonly un
   receiptIds.forEach((receiptId) => store.delete(`preview-receipt:${receiptId}`));
 }
 
-export class IndexedDbM1bAdapter {
-  static readonly runtimeContract: M1bRuntimeContract = {
+export class IndexedDbM1bAdapter implements RuntimeStoragePort {
+  static readonly runtimeContract: M1bRuntimeContract = Object.freeze({
     indexedDb: true,
     crossTabBrowserVerified: false,
     purgeCoverage: 'single-browser-in-process',
     broadcastChannelRequiredForCorrectness: false,
-  };
+  });
 
   private db?: IDBDatabase;
   private opening?: Promise<IDBDatabase>;
@@ -130,9 +143,11 @@ export class IndexedDbM1bAdapter {
   private readonly adapterId = crypto.randomUUID();
   private readonly ownedRootKeys = new Set<string>();
   private readonly rootCoordinator: RootCoordinator;
+  private pendingDatabaseDeletion?: Promise<boolean>;
   private disposed = false;
 
-  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now) {
+  constructor(readonly databaseName = `proagi-m1b-${crypto.randomUUID()}`, private readonly clock: () => number = Date.now, private readonly openTimeoutMs = OPEN_TIMEOUT_MS) {
+    if (!Number.isSafeInteger(openTimeoutMs) || openTimeoutMs <= 0) throw new M1bError('ERR_OPEN_TIMEOUT_INVALID');
     this.rootCoordinator = rootCoordinatorFor(databaseName);
     if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCED');
     this.rootCoordinator.adapterRefs += 1;
@@ -142,6 +157,7 @@ export class IndexedDbM1bAdapter {
 
   async open(): Promise<void> {
     if (this.disposed) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
+    if (this.pendingDatabaseDeletion || this.rootCoordinator.databaseDeletionPending) throw new M1bError('ERR_STORAGE_BLOCKED');
     if (this.db) return;
     if (this.opening) {
       const opened = await this.opening;
@@ -160,7 +176,10 @@ export class IndexedDbM1bAdapter {
       if (!database.objectStoreNames.contains('system')) database.createObjectStore('system', { keyPath: 'recordId' });
       if (!database.objectStoreNames.contains('heads')) database.createObjectStore('heads', { keyPath: 'recordId' });
       if (!database.objectStoreNames.contains('ledger')) database.createObjectStore('ledger', { keyPath: 'idempotencyKey' });
-      if (!database.objectStoreNames.contains('journal')) database.createObjectStore('journal', { keyPath: 'id' });
+      const journal = database.objectStoreNames.contains('journal')
+         ? request.transaction!.objectStore('journal')
+         : database.createObjectStore('journal', { keyPath: 'id' });
+       if (!journal.indexNames.contains('byDeletionId')) journal.createIndex('byDeletionId', 'deletionId', { unique: false });
       if (!database.objectStoreNames.contains('audit')) database.createObjectStore('audit', { keyPath: 'recordId' });
       if (!database.objectStoreNames.contains('projection')) database.createObjectStore('projection', { keyPath: 'projectionId' });
       if (!database.objectStoreNames.contains('changes')) {
@@ -171,7 +190,7 @@ export class IndexedDbM1bAdapter {
       if (oldVersion === 0) request.transaction?.objectStore('meta').put(initialMeta());
       else if (oldVersion < 3) migrateLegacyMeta(request.transaction!);
     };
-    this.opening = requestValue(request);
+    this.opening = openDatabaseRequest(request, this.openTimeoutMs);
     try {
       const opened = await this.opening;
       if (this.disposed) {
@@ -250,14 +269,39 @@ export class IndexedDbM1bAdapter {
     }
   }
 
-  private async acquireRootQuiescence(deletionId: string, generation: string): Promise<() => void> {
+  private releaseRootQuiescence(token: symbol, frozenRoots: readonly RegisteredRoot[]): unknown {
+    if (this.rootCoordinator.quiescence?.token !== token) return undefined;
+    let firstError: unknown;
+    for (const root of [...frozenRoots].reverse()) {
+      try { root.hooks.unfreeze(); } catch (error) { firstError ??= error; }
+    }
+    this.rootCoordinator.quiescence = null;
+    const deferred = [...this.rootCoordinator.deferredDisposals];
+    this.rootCoordinator.deferredDisposals.clear();
+    for (const adapter of deferred) {
+      try { adapter.detachFromCoordinator(); } catch (error) { firstError ??= error; }
+    }
+    maybeDropRootCoordinator(this.databaseName, this.rootCoordinator);
+    return firstError;
+  }
+
+  private async acquireRootQuiescence(deletionId: string, generation: string, timeoutMs = QUIESCENCE_DRAIN_TIMEOUT_MS): Promise<() => void> {
     if (this.rootCoordinator.quiescence) throw new M1bError('ERR_PURGE_QUIESCENCE_BUSY');
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new M1bError('ERR_PURGE_QUIESCENCE_TIMEOUT');
     const token = Symbol('root-quiescence');
     // Publish the barrier before waiting so no new mutation or topology change
     // can enter while already-admitted work drains.
     this.rootCoordinator.quiescence = { token, deletionId, generation, revision: this.rootCoordinator.revision, frozenRoots: [] };
     if (this.rootCoordinator.activeMutations > 0) {
-      await new Promise<void>((resolve) => this.rootCoordinator.mutationWaiters.add(resolve));
+      const drain = new Promise<void>((resolve) => this.rootCoordinator.mutationWaiters.add(resolve));
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<boolean>((resolve) => { timeoutHandle = setTimeout(() => resolve(false), timeoutMs); });
+      const drained = await Promise.race([drain.then(() => true), timeout]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (!drained) {
+        void drain.then(() => { this.releaseRootQuiescence(token, []); });
+        throw new M1bError('ERR_PURGE_QUIESCENCE_TIMEOUT');
+      }
     }
     const frozenRoots = [...this.rootCoordinator.roots.values()];
     this.rootCoordinator.quiescence = { token, deletionId, generation, revision: this.rootCoordinator.revision, frozenRoots };
@@ -268,24 +312,12 @@ export class IndexedDbM1bAdapter {
         frozen.push(root);
       }
     } catch (error) {
-      let firstError: unknown = error;
-      for (const root of frozen.reverse()) {
-        try { root.hooks.unfreeze(); } catch (unfreezeError) { firstError ??= unfreezeError; }
-      }
-      this.rootCoordinator.quiescence = null;
-      throw firstError;
+      const cleanupError = this.releaseRootQuiescence(token, frozen);
+      throw error ?? cleanupError;
     }
     return () => {
-      if (this.rootCoordinator.quiescence?.token !== token) return;
-      let firstError: unknown;
-      for (const root of [...frozenRoots].reverse()) {
-        try { root.hooks.unfreeze(); } catch (error) { firstError ??= error; }
-      }
-      this.rootCoordinator.quiescence = null;
-      const deferred = [...this.rootCoordinator.deferredDisposals];
-      this.rootCoordinator.deferredDisposals.clear();
-      for (const adapter of deferred) adapter.detachFromCoordinator();
-      if (firstError) throw new M1bError('ERR_PURGE_UNFREEZE');
+      const cleanupError = this.releaseRootQuiescence(token, frozen);
+      if (cleanupError) throw new M1bError('ERR_PURGE_UNFREEZE');
     };
   }
 
@@ -483,13 +515,16 @@ export class IndexedDbM1bAdapter {
       assertMeta(meta, meta.cursor, privacyEpoch, true);
       assertNoPurgedPreviewReference(bytes, meta);
       const system = tx.objectStore('system');
-      const existing = await requestValue<Array<Partial<PreviewCommitGuardRecord> & { recordId?: string; receiptId?: string; writtenAt?: string }>>(system.getAll());
+      const existing = await requestValue<Record<string, unknown>[]>(system.getAll());
       sweepConsumedPreviewRecords(system, existing, now);
+      const tokenTombstoneId = `preview-token-tombstone:${tokenHash}`;
+      const tokenReuseRejected = existing.some((record) => (record.recordType === 'preview_token_tombstone' && record.recordId === tokenTombstoneId) || (record.recordType === 'preview_commit_guard' && record.recordId === recordId && record.state === 'CONSUMED'));
       for (const record of existing) {
-        if (record.recordType === 'preview_commit_guard' && record.state === 'READY' && record.recordId && record.expiresAt && Date.parse(record.expiresAt) <= now) system.delete(record.recordId);
+        if (record.recordType === 'preview_commit_guard' && record.state === 'READY' && typeof record.recordId === 'string' && typeof record.expiresAt === 'string' && Date.parse(record.expiresAt) <= now) system.delete(record.recordId);
       }
-      system.add(guard);
+      if (!tokenReuseRejected) system.add(guard);
       await done;
+      if (tokenReuseRejected) throw new M1bError('ERR_PREVIEW_CONSUMED');
       this.previewBuffers.set(tokenHash, { bytes, bufferHandleHash, expiresAt: expiresAt });
       return { token, guard };
     } catch (error) {
@@ -823,7 +858,6 @@ export class IndexedDbM1bAdapter {
       const journals = await requestValue<ActiveDeletionJournalRecord[]>(tx.objectStore('journal').getAll());
       assertJournalCollection(journals);
        const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
-       if (active?.purge.sealedAt) throw new M1bError('ERR_PURGE_SEALED_RETRY');
        const failed = journals.some((item) => item.recordType === 'active_deletion_journal' && item.state === 'FAILED');
        if (failed) throw new M1bError('ERR_RECOVERY_FAILED');
        const stickyQuarantine = !active && current.state === 'QUARANTINED' && Boolean(current.purgeGeneration) && current.purgeAckGeneration !== current.purgeGeneration;
@@ -949,32 +983,41 @@ export class IndexedDbM1bAdapter {
   }
 
   async enumerateDeletionPage(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    assertPageLimit(limit);
     return this.withRootMutation(async () => {
     const db = await this.database();
-    const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
-    const done = transactionDone(tx);
+    const descriptorTx = db.transaction(['journal', 'system'], 'readonly');
+    const descriptorDone = transactionDone(descriptorTx);
     try {
-      await assertLease(tx, ownerClientId, fencingToken, now);
-      const journalStore = tx.objectStore('journal');
-      const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
-      if (!journal || journal.state !== 'FENCED') throw new M1bError('ERR_DELETION_STATE');
-       assertDeletionJournal(journal);
-      const root = ROOT_STORES[journal.enumeration.registryIndex];
+      await assertLease(descriptorTx, ownerClientId, fencingToken, now);
+      const descriptor = await requestValue<ActiveDeletionJournalRecord | undefined>(descriptorTx.objectStore('journal').get(deletionId));
+      if (!descriptor || descriptor.state !== 'FENCED') throw new M1bError('ERR_DELETION_STATE');
+      assertDeletionJournal(descriptor);
+      const root = ROOT_STORES[descriptor.enumeration.registryIndex];
+      await descriptorDone;
+      const stores = [...new Set<PhysicalStoreName>(['meta', 'journal', 'system', ...(root ? [root] : [])])];
+      const tx = this.mutationTransaction(db, stores, 'readwrite');
+      const done = transactionDone(tx);
+      try {
+        await assertLease(tx, ownerClientId, fencingToken, now);
+        const journalStore = tx.objectStore('journal');
+        const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
+        if (!journal || journal.state !== 'FENCED') throw new M1bError('ERR_DELETION_STATE');
+        assertDeletionJournal(journal);
+        const currentRoot = ROOT_STORES[journal.enumeration.registryIndex];
+        if (currentRoot !== root) throw new M1bError('ERR_CURSOR_CONFLICT');
       if (!root) {
         const completed = updateJournalHash({ ...journal, state: 'DELETING', enumeration: { ...journal.enumeration, complete: true }, updatedAt: new Date(now).toISOString() });
         journalStore.put(completed);
         await done;
         return completed;
       }
-      const { keys, values } = await entries(tx.objectStore(root));
-      const start = journal.enumeration.pageOffset;
-      const end = Math.min(values.length, start + limit);
+      assertPageLimit(limit);
+      const page = await cursorPage(tx.objectStore(root), journal.enumeration.continuationKey, journal.enumeration.pageOffset, limit);
       let nextOrdinal = BigInt(journal.progress.nextOrdinal);
       let added = 0;
       let recoveryDelta = 0;
-      for (let index = start; index < end; index += 1) {
-        const value = values[index];
-        const key = keys[index];
+      for (const { key, value } of page.entries) {
         if (isOwnDeletionControl(root, key, value, journal) || root === 'meta') continue;
         if (!matchesDeletionTarget(value, journal)) continue;
         const work: DeletionWorkItemRecord = {
@@ -991,7 +1034,7 @@ export class IndexedDbM1bAdapter {
         nextOrdinal += 1n;
         added += 1;
       }
-      const rootDone = end >= values.length;
+      const rootDone = page.complete;
       const nextRootIndex = rootDone ? journal.enumeration.registryIndex + 1 : journal.enumeration.registryIndex;
       const enumerationComplete = nextRootIndex >= ROOT_STORES.length;
       const next = updateJournalHash({
@@ -999,9 +1042,10 @@ export class IndexedDbM1bAdapter {
         state: enumerationComplete ? 'DELETING' : 'FENCED',
         enumeration: {
           registryIndex: nextRootIndex,
-          pageOffset: rootDone ? 0 : end,
+          pageOffset: 0,
+          ...(rootDone ? {} : { continuationKey: page.lastKey }),
           complete: enumerationComplete,
-          enumeratedCount: journal.enumeration.enumeratedCount + (end - start),
+          enumeratedCount: journal.enumeration.enumeratedCount + page.count,
         },
         progress: { ...journal.progress, nextOrdinal: nextOrdinal.toString(), totalCount: journal.progress.totalCount + added },
         updatedAt: new Date(now).toISOString(),
@@ -1010,56 +1054,62 @@ export class IndexedDbM1bAdapter {
       await bumpRecoveryCursor(tx, 0, recoveryDelta);
       await done;
       return next;
+      } catch (error) {
+        safeAbort(tx);
+        await done.catch(() => undefined);
+        throw normalizeIdbError(error);
+      }
     } catch (error) {
-      safeAbort(tx);
-      await done.catch(() => undefined);
+      safeAbort(descriptorTx);
+      await descriptorDone.catch(() => undefined);
       throw normalizeIdbError(error);
     }
     });
   }
 
   async deleteChunk(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    assertPageLimit(limit);
     return this.withRootMutation(async () => {
-    const db = await this.database();
-    const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
-    const done = transactionDone(tx);
-    try {
-      await assertLease(tx, ownerClientId, fencingToken, now);
-      const journalStore = tx.objectStore('journal');
-      const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
-      if (!journal || journal.state !== 'DELETING') throw new M1bError('ERR_DELETION_STATE');
-       assertDeletionJournal(journal);
-      const all = await requestValue<DeletionWorkItemRecord[]>(journalStore.getAll());
-      const work = all.filter((item) => item.deletionId === deletionId && item.id.startsWith('work:')).sort((a, b) => BigInt(a.ordinal) < BigInt(b.ordinal) ? -1 : 1);
-      const selected = work.slice(0, limit);
-      let reclaimed = 0;
-      for (const item of selected) {
-        const store = tx.objectStore(item.storeName);
-        const current = await requestValue<unknown>(store.get(item.recordId));
-        if (current !== undefined) {
-          const currentHash = recordHash(current);
-          if (item.expectedContentHash && currentHash && currentHash !== item.expectedContentHash) throw new M1bError('ERR_HASH_MISMATCH');
-          store.delete(item.recordId);
-          reclaimed += estimateBytes(current);
-        }
-        journalStore.delete(item.id);
+      const db = await this.database();
+      const tx = this.mutationTransaction(db, [...ROOT_STORES], 'readwrite');
+      const done = transactionDone(tx);
+      try {
+        await assertLease(tx, ownerClientId, fencingToken, now);
+        const journalStore = tx.objectStore('journal');
+        const journal = await requestValue<ActiveDeletionJournalRecord | undefined>(journalStore.get(deletionId));
+        if (!journal || journal.state !== 'DELETING') throw new M1bError('ERR_DELETION_STATE');
+        assertDeletionJournal(journal);
+        // Selection and deletion share one readwrite transaction. IDB serializes
+        // same-database transactions, so a concurrent same-token chunk cannot
+        // count an advisory page that another chunk has already consumed.
+        const selectedPage = await deletionWorkPage(journalStore, deletionId, limit);
+        let reclaimed = 0;
+        const currentValues = await Promise.all(selectedPage.items.map((item) => requestValue<unknown>(tx.objectStore(item.storeName).get(item.recordId))));
+        selectedPage.items.forEach((item, index) => {
+          const current = currentValues[index];
+          if (current !== undefined) {
+            const currentHash = recordHash(current);
+            if (item.expectedContentHash && currentHash && currentHash !== item.expectedContentHash) throw new M1bError('ERR_HASH_MISMATCH');
+            tx.objectStore(item.storeName).delete(item.recordId);
+            reclaimed += estimateBytes(current);
+          }
+          journalStore.delete(item.id);
+        });
+        const next = updateJournalHash({
+          ...journal,
+          state: selectedPage.complete ? 'PURGE_PENDING' : 'DELETING',
+          progress: { ...journal.progress, completedCount: journal.progress.completedCount + selectedPage.items.length },
+          updatedAt: new Date(now).toISOString(),
+        });
+        journalStore.put(next);
+        await bumpRecoveryCursor(tx, reclaimed);
+        await done;
+        return next;
+      } catch (error) {
+        safeAbort(tx);
+        await done.catch(() => undefined);
+        throw normalizeIdbError(error);
       }
-      const remaining = work.length - selected.length;
-      const next = updateJournalHash({
-        ...journal,
-        state: remaining === 0 ? 'PURGE_PENDING' : 'DELETING',
-        progress: { ...journal.progress, completedCount: journal.progress.completedCount + selected.length },
-        updatedAt: new Date(now).toISOString(),
-      });
-      journalStore.put(next);
-      await bumpRecoveryCursor(tx, reclaimed);
-      await done;
-      return next;
-    } catch (error) {
-      safeAbort(tx);
-      await done.catch(() => undefined);
-      throw normalizeIdbError(error);
-    }
     });
   }
 
@@ -1105,7 +1155,8 @@ export class IndexedDbM1bAdapter {
         if (record.recordType === 'purge_ack' && record.deletionId === deletionId && record.generation === oldGeneration) system.delete(record.recordId);
       }
       const generation = crypto.randomUUID();
-      const requiredClientIds = records.filter((record) => record.recordType === 'client_registration' && record.state !== 'CLOSING' && Date.parse(record.leaseExpiresAt) > now).map((record) => record.clientId).sort();
+      const explicitlyLive = new Set(liveClientIds);
+       const requiredClientIds = records.filter((record) => record.recordType === 'client_registration' && record.state !== 'CLOSING' && (Date.parse(record.leaseExpiresAt) > now || explicitlyLive.has(record.clientId) || (record.state === 'QUARANTINED' && record.purgeGeneration === oldGeneration))).map((record) => record.clientId).sort();
       for (const record of records) {
         if (record.recordType === 'client_registration' && requiredClientIds.includes(record.clientId)) {
           const nextBase = { ...record, state: 'QUARANTINED' as const, purgeGeneration: generation, writtenAt: new Date(now).toISOString() };
@@ -1181,6 +1232,7 @@ export class IndexedDbM1bAdapter {
   }
 
   async finalizeDeletionPage(deletionId: string, ownerClientId: string, fencingToken: string, limit = 500, now = Date.now()): Promise<ActiveDeletionJournalRecord> {
+    assertPageLimit(limit);
     return this.withRootMutation(async () => {
     const db = await this.database();
     const tx = this.mutationTransaction(db, ['meta', 'journal', 'system'], 'readwrite');
@@ -1423,34 +1475,56 @@ export class IndexedDbM1bAdapter {
     });
   }
 
-  async clearAll(options: { simulateBlocked?: boolean; cachesCleared?: boolean } = {}): Promise<ClearAllResult> {
-    const releaseQuiescence = await this.acquireRootQuiescence(`clear:${crypto.randomUUID()}`, `clear:${Date.now()}`);
+  async clearAll(options: { simulateBlocked?: boolean; cachesCleared?: boolean; deleteTimeoutMs?: number; quiescenceTimeoutMs?: number } = {}): Promise<ClearAllResult> {
+    const releaseQuiescence = await this.acquireRootQuiescence(`clear:${crypto.randomUUID()}`, `clear:${Date.now()}`, options.quiescenceTimeoutMs);
+    let retainQuiescence = false;
     try {
       const db = await this.database();
-    const tx = db.transaction('meta', 'readwrite');
-    const done = transactionDone(tx);
-    const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
-    tx.objectStore('meta').put({ ...meta, recoveryMode: 'CLEAR_ONLY' });
-    await done;
-    for (const adapter of this.rootCoordinator.adapters) adapter.previewBuffers.clear();
-    const cachesCleared = options.cachesCleared === true;
-    if (!cachesCleared) {
-      return { state: 'BLOCKED', databaseDeleted: false, cachesCleared: false, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
-    }
-    if (options.simulateBlocked) {
-      return { state: 'BLOCKED', databaseDeleted: false, cachesCleared, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
-    }
-    this.close();
-    const deleted = await deleteDatabaseResult(this.databaseName);
-    if (!deleted) {
-      return { state: 'BLOCKED', databaseDeleted: false, cachesCleared, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
-    }
-    await this.open();
-    const reopened = await this.getMeta();
-    const empty = (await this.getAll('business')).length === 0 && reopened.cursor === '0';
-    return { state: empty ? 'SUCCEEDED' : 'BLOCKED', databaseDeleted: true, cachesCleared, emptyReopenVerified: empty, ...(empty ? {} : { errorCode: 'ERR_STORAGE_BLOCKED' as const }), coverage: 'single-browser-in-process' };
-      } finally {
-      releaseQuiescence();
+      const tx = db.transaction('meta', 'readwrite');
+      const done = transactionDone(tx);
+      const meta = await requestValue<StoreMetaRecord | undefined>(tx.objectStore('meta').get('canonical'));
+      assertMeta(meta, meta?.cursor ?? '0', meta?.privacyEpoch ?? -1, false);
+      tx.objectStore('meta').put({ ...meta, recoveryMode: 'CLEAR_ONLY' });
+      await done;
+      for (const adapter of this.rootCoordinator.adapters) adapter.previewBuffers.clear();
+      const cachesCleared = options.cachesCleared === true;
+      if (!cachesCleared) {
+        return { state: 'BLOCKED', databaseDeleted: false, cachesCleared: false, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
+      }
+      if (options.simulateBlocked) {
+        return { state: 'BLOCKED', databaseDeleted: false, cachesCleared, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
+      }
+      // Quiescence drains admitted mutations, so close every in-process handle
+      // before asking IndexedDB to delete the database. A sibling adapter may
+      // otherwise keep the delete request blocked indefinitely.
+      for (const adapter of this.rootCoordinator.adapters) {
+        await adapter.opening?.catch(() => undefined);
+        adapter.close();
+      }
+      const deletionPromise = deleteDatabaseResult(this.databaseName, options.deleteTimeoutMs);
+      const settlement = deletionPromise.then(({ settled }) => settled).then((value) => value, () => false);
+      this.rootCoordinator.databaseDeletionPending = settlement;
+      const deletion = await deletionPromise;
+      if (deletion.pending) {
+        retainQuiescence = true;
+        this.pendingDatabaseDeletion = settlement;
+        void settlement.then(() => {
+          if (this.pendingDatabaseDeletion === settlement) this.pendingDatabaseDeletion = undefined;
+          if (this.rootCoordinator.databaseDeletionPending === settlement) this.rootCoordinator.databaseDeletionPending = undefined;
+          try { releaseQuiescence(); } catch { /* barrier state is already cleared; no old handle is reopened */ }
+        });
+        return { state: 'BLOCKED', databaseDeleted: false, cachesCleared, emptyReopenVerified: false, pendingDeletion: true, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
+      }
+      this.rootCoordinator.databaseDeletionPending = undefined;
+      if (!deletion.deleted) {
+        return { state: 'BLOCKED', databaseDeleted: false, cachesCleared, emptyReopenVerified: false, errorCode: 'ERR_STORAGE_BLOCKED', coverage: 'single-browser-in-process' };
+      }
+      await this.open();
+      const reopened = await this.getMeta();
+      const empty = (await this.getAll('business')).length === 0 && reopened.cursor === '0';
+      return { state: empty ? 'SUCCEEDED' : 'BLOCKED', databaseDeleted: true, cachesCleared, emptyReopenVerified: empty, ...(empty ? {} : { errorCode: 'ERR_STORAGE_BLOCKED' as const }), coverage: 'single-browser-in-process' };
+    } finally {
+      if (!retainQuiescence) releaseQuiescence();
     }
   }
 
@@ -1571,18 +1645,17 @@ export class IndexedDbM1bAdapter {
     const purgeAckClientIds = new Set<string>();
     let reachableCount = 0;
     for (const root of ROOT_STORES) {
-      const { keys, values } = await entries(tx.objectStore(root));
       let forbiddenReferenceCount = 0;
-      values.forEach((value, index) => {
+      const scannedItemCount = await scanStore(tx.objectStore(root), (key, value) => {
         if (root === 'system' && value && typeof value === 'object' && isPurgeAck(value as StoredRecord | PurgeAckRecord) && (value as PurgeAckRecord).deletionId === journal.id && (value as PurgeAckRecord).generation === journal.purge.generation) {
           const ack = value as PurgeAckRecord;
           assertCanonicalHash(ack, 'ERR_PURGE_ACK_HASH_INVALID');
           purgeAckClientIds.add(ack.clientId);
         }
-        if (isOwnDeletionControl(root, keys[index], value, journal)) return;
+        if (isOwnDeletionControl(root, key, value, journal)) return;
         if (matchesDeletionTarget(value, journal)) forbiddenReferenceCount += 1;
       });
-      receipts.push({ rootId: `idb.${root}`, scannedItemCount: values.length, forbiddenReferenceCount });
+      receipts.push({ rootId: `idb.${root}`, scannedItemCount, forbiddenReferenceCount });
       reachableCount += forbiddenReferenceCount;
     }
     if (!existingTx) await transactionDone(tx);
@@ -1667,16 +1740,6 @@ export class IndexedDbM1bAdapter {
     if (!this.db) throw new M1bError('ERR_STORAGE_UNAVAILABLE');
     return this.db;
   }
-}
-
-export function makeBatch(input: Omit<AtomicMutationBatch, 'batchHash'>): AtomicMutationBatch {
-  const normalized = { ...input, storeNames: [...input.storeNames].sort() };
-  return { ...normalized, batchHash: hashCanonical({ expectedCursor: normalized.expectedCursor, expectedPrivacyEpoch: normalized.expectedPrivacyEpoch, requiresActiveObservation: normalized.requiresActiveObservation === true, requiresPreview: normalized.requiresPreview === true, storeNames: normalized.storeNames, mutations: normalized.mutations }) };
-}
-
-export function toStoredRecord<T>(recordId: string, recordType: string, payload: T, writtenAt = new Date().toISOString()): StoredRecord<T> {
-  const base = { recordId, recordType, writtenAt, payload };
-  return { ...base, contentHash: hashCanonical(base) };
 }
 
 function immutablePayloadHash(record: StoredRecord): Hash {
@@ -1865,8 +1928,38 @@ function assertVerificationReceipt(receipt: DeletionVerificationReceiptRecord, d
 }
 
 function assertDeletionJournal(journal: ActiveDeletionJournalRecord): void {
-  assertCanonicalHash(journal, 'ERR_JOURNAL_HASH_INVALID');
-  if (!Array.isArray(journal.targetAnchors) || journal.targetAnchors.some((anchor: unknown) => typeof anchor !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(anchor))) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
+  const candidate = journal as unknown as Record<string, unknown>;
+  const asRecord = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const nonnegativeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const hashValue = (value: unknown): value is string => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
+  const timestampValue = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
+  const enumeration = asRecord(candidate.enumeration);
+  const progress = asRecord(candidate.progress);
+  const purge = asRecord(candidate.purge);
+  const finalizing = asRecord(candidate.finalizing);
+  const registryIndex = enumeration?.registryIndex;
+  const pageOffset = enumeration?.pageOffset;
+  const continuationKey = enumeration?.continuationKey;
+  const enumeratedCount = enumeration?.enumeratedCount;
+  const nextOrdinal = progress?.nextOrdinal;
+  const completedCount = progress?.completedCount;
+  const totalCount = progress?.totalCount;
+  const requiredClientIds = purge?.requiredClientIds;
+  const removedControlCount = finalizing?.removedControlCount;
+  if (typeof candidate.id !== 'string' || candidate.recordType !== 'active_deletion_journal' || !['FENCED', 'DELETING', 'PURGE_PENDING', 'AUDITING', 'FINALIZING', 'FAILED'].includes(String(candidate.state))
+    || typeof candidate.planId !== 'string' || !hashValue(candidate.planHash) || typeof candidate.targetId !== 'string' || !hashValue(candidate.targetHash) || typeof candidate.targetType !== 'string'
+    || !Array.isArray(candidate.targetAnchors) || candidate.targetAnchors.some((anchor: unknown) => !hashValue(anchor)) || typeof candidate.baseCursor !== 'string' || !/^\d+$/.test(candidate.baseCursor)
+    || !nonnegativeInteger(candidate.basePrivacyEpoch) || !enumeration || !nonnegativeInteger(registryIndex) || registryIndex > ROOT_STORES.length
+    || !nonnegativeInteger(pageOffset) || (continuationKey !== undefined && typeof continuationKey !== 'string')
+    || typeof enumeration.complete !== 'boolean' || !nonnegativeInteger(enumeratedCount)
+    || !progress || typeof nextOrdinal !== 'string' || !/^\d+$/.test(nextOrdinal) || !nonnegativeInteger(completedCount) || !nonnegativeInteger(totalCount) || completedCount > totalCount
+    || !purge || typeof purge.generation !== 'string' || !timestampValue(purge.cutoff) || (purge.sealedAt !== undefined && !timestampValue(purge.sealedAt))
+    || !Array.isArray(requiredClientIds) || requiredClientIds.some((clientId: unknown) => typeof clientId !== 'string')
+    || !finalizing || typeof finalizing.complete !== 'boolean' || !nonnegativeInteger(removedControlCount)
+    || !timestampValue(candidate.updatedAt) || !hashValue(candidate.contentHash)) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
+  const orderedClientIds = requiredClientIds as readonly string[];
+  if ([...new Set(orderedClientIds)].length !== orderedClientIds.length || orderedClientIds.some((clientId, index) => index > 0 && orderedClientIds[index - 1]! > clientId)) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
+  try { assertCanonicalHash(journal, 'ERR_JOURNAL_HASH_INVALID'); } catch (error) { if (error instanceof M1bError) throw error; throw new M1bError('ERR_JOURNAL_HASH_INVALID'); }
 }
 
 function assertJournalCollection(records: readonly ActiveDeletionJournalRecord[]): void {
@@ -1899,8 +1992,11 @@ function migrateLegacyMeta(tx: IDBTransaction): void {
       const existingDigests = legacy.purgedAnchorDigests;
       if (existingDigests !== undefined && (!Array.isArray(existingDigests) || existingDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
       const allDigests = [...new Set([...(existingDigests ?? []), ...anchorDigests])].sort() as Hash[];
+      const unrecoverablePurgeHistory = typeof legacy.lastPurgeCursor === 'string' && /^\d+$/.test(legacy.lastPurgeCursor) && BigInt(legacy.lastPurgeCursor) > 0n
+        && (raw.length === 0 || raw.some((value) => !hasLegacyWatermarkAnchors(value)));
       const migrated: StoreMetaRecord = {
         ...(legacy as StoreMetaRecord),
+        ...(unrecoverablePurgeHistory ? { recoveryMode: 'RECOVERY_ONLY' as const } : {}),
         purgedAnchorDigests: allDigests,
         purgedAnchorIndexHash: hashCanonical(allDigests),
         ...(deduped.length && latest ? { purgeWatermarks: deduped, purgeWatermark: latest, lastPurgeCursor: latest.cursor } : {}),
@@ -1930,7 +2026,9 @@ function migrateLegacyDeletionControls(tx: IDBTransaction): void {
         assertCanonicalHash(value as { contentHash: Hash }, 'ERR_JOURNAL_HASH_INVALID');
         const anchors = candidate.targetAnchors;
         if (!Array.isArray(anchors) || anchors.some((anchor) => typeof anchor !== 'string')) throw new M1bError('ERR_JOURNAL_HASH_INVALID');
-        const digests = anchors.every((anchor) => /^sha256:[0-9a-f]{64}$/.test(anchor)) ? anchors as Hash[] : anchors.map((anchor) => sha256(anchor));
+        // v2 targetAnchors were raw lineage identities. Hash every value,
+        // including strings that already look like a sha256 digest.
+        const digests = anchors.map((anchor) => sha256(anchor));
         const next = { ...candidate, targetAnchors: [...new Set(digests)].sort() };
         const hashable = { ...next } as Record<string, unknown>;
         delete hashable.contentHash;
@@ -2001,6 +2099,13 @@ function migrateLegacyDeletionControls(tx: IDBTransaction): void {
   journalRequest.onerror = fail;
 }
 
+function hasLegacyWatermarkAnchors(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const watermark = value as Record<string, unknown>;
+  const anchors = watermark.targetAnchors ?? watermark.anchorDigests ?? watermark.lineageAnchors;
+  return Array.isArray(anchors) && anchors.every((anchor) => typeof anchor === 'string');
+}
+
 function migrateLegacyWatermark(value: unknown): PurgeWatermark {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
   const watermark = value as Record<string, unknown>;
@@ -2010,13 +2115,16 @@ function migrateLegacyWatermark(value: unknown): PurgeWatermark {
     throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
   }
   assertCanonicalHash(value as { contentHash: Hash }, 'ERR_PURGE_WATERMARK_INVALID');
-  const anchorDigests = watermark.anchorDigests;
-  if (anchorDigests !== undefined && (!Array.isArray(anchorDigests) || anchorDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const legacyAnchors = watermark.targetAnchors ?? watermark.anchorDigests ?? watermark.lineageAnchors;
+  if (legacyAnchors !== undefined && (!Array.isArray(legacyAnchors) || legacyAnchors.some((anchor: unknown) => typeof anchor !== 'string'))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  // The legacy fields contain raw identities. Never trust a hash-shaped raw
+  // identity as an already-hashed anchor: hash every value exactly once.
+  const anchorDigests = (legacyAnchors ?? []).map((anchor) => sha256(anchor)).sort() as Hash[];
   const base: Omit<PurgeWatermark, 'contentHash'> = {
     deletionId: watermark.deletionId,
     generation: watermark.generation,
     cursor: watermark.cursor,
-    anchorDigests: [...(anchorDigests ?? [])].sort() as Hash[],
+    anchorDigests,
     journalHash: watermark.journalHash as Hash,
     leaseGeneration: watermark.leaseGeneration,
     verifiedAt: watermark.verifiedAt,
@@ -2043,20 +2151,35 @@ function initialMeta(): StoreMetaRecord {
 }
 
 function assertMetaWatermarks(meta: StoreMetaRecord): void {
-  if (meta.lastPurgeCursor !== undefined && !/^\d+$/.test(meta.lastPurgeCursor)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
-  if (!Array.isArray(meta.purgedAnchorDigests) || !/^sha256:[0-9a-f]{64}$/.test(meta.purgedAnchorIndexHash)
-    || hashCanonical(meta.purgedAnchorDigests) !== meta.purgedAnchorIndexHash
-    || meta.purgedAnchorDigests.some((digest) => !/^sha256:[0-9a-f]{64}$/.test(digest))
-    || [...new Set(meta.purgedAnchorDigests)].length !== meta.purgedAnchorDigests.length
-    || meta.purgedAnchorDigests.some((digest, index) => index > 0 && meta.purgedAnchorDigests[index - 1]! > digest)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
-  if (meta.purgeWatermarks !== undefined && !Array.isArray(meta.purgeWatermarks)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
-  const permanent = new Set(meta.purgedAnchorDigests);
-  const watermarks = [...(meta.purgeWatermarks ?? []), ...(meta.purgeWatermark ? [meta.purgeWatermark] : [])];
-  for (const watermark of watermarks) {
-    assertCanonicalHash(watermark, 'ERR_PURGE_WATERMARK_INVALID');
-    const anchorDigests: unknown = watermark.anchorDigests;
-    if (!Array.isArray(anchorDigests) || anchorDigests.some((digest: unknown) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest) || !permanent.has(digest))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
-    if (!/^sha256:[0-9a-f]{64}$/.test(watermark.journalHash)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const candidate = meta as unknown as Record<string, unknown>;
+  const nonnegativeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  if (!candidate || Array.isArray(candidate) || candidate.key !== 'canonical' || typeof candidate.cursor !== 'string' || !/^\d+$/.test(candidate.cursor)
+    || !nonnegativeInteger(candidate.privacyEpoch) || !['ACTIVE', 'PRIVATE'].includes(String(candidate.observationMode))
+    || !['NORMAL', 'RECOVERY_ONLY', 'CLEAR_ONLY'].includes(String(candidate.recoveryMode))
+    || candidate.schemaVersion !== '1.0.0' || !nonnegativeInteger(candidate.logicalBytes) || !nonnegativeInteger(candidate.recoveryBytes)
+    || candidate.recoveryBytes > 5242880 || candidate.recoveryReserveBytes !== 5242880 || candidate.sizeEstimatorVersion !== 'storage-size-v1'
+    || (candidate.incarnation !== undefined && typeof candidate.incarnation !== 'string')) throw new M1bError('ERR_STORAGE_CORRUPT');
+  if (candidate.lastPurgeCursor !== undefined && (typeof candidate.lastPurgeCursor !== 'string' || !/^\d+$/.test(candidate.lastPurgeCursor))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const purgedAnchorDigests = candidate.purgedAnchorDigests;
+  const purgedAnchorIndexHash = candidate.purgedAnchorIndexHash;
+  let purgedAnchorIndexMatches = false;
+  try { purgedAnchorIndexMatches = Array.isArray(purgedAnchorDigests) && hashCanonical(purgedAnchorDigests) === purgedAnchorIndexHash; } catch { throw new M1bError('ERR_PURGE_WATERMARK_INVALID'); }
+  if (!Array.isArray(purgedAnchorDigests) || typeof purgedAnchorIndexHash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(purgedAnchorIndexHash)
+    || !purgedAnchorIndexMatches
+    || purgedAnchorDigests.some((digest) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest))
+    || [...new Set(purgedAnchorDigests)].length !== purgedAnchorDigests.length
+    || purgedAnchorDigests.some((digest, index) => index > 0 && String(purgedAnchorDigests[index - 1]) > String(digest))) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  if (candidate.purgeWatermarks !== undefined && !Array.isArray(candidate.purgeWatermarks)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+  const permanent = new Set(purgedAnchorDigests as string[]);
+  const watermarks = [...(candidate.purgeWatermarks as unknown[] ?? []), ...(candidate.purgeWatermark ? [candidate.purgeWatermark] : [])];
+  for (const value of watermarks) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+    const watermark = value as Record<string, unknown>;
+    if (typeof watermark.deletionId !== 'string' || typeof watermark.generation !== 'string' || typeof watermark.cursor !== 'string' || !/^\d+$/.test(watermark.cursor)
+      || typeof watermark.leaseGeneration !== 'number' || !Number.isSafeInteger(watermark.leaseGeneration) || watermark.leaseGeneration < 0
+      || typeof watermark.verifiedAt !== 'string' || !Array.isArray(watermark.anchorDigests) || watermark.anchorDigests.some((digest) => typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest) || !permanent.has(digest))
+      || typeof watermark.journalHash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(watermark.journalHash) || typeof watermark.contentHash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(watermark.contentHash)) throw new M1bError('ERR_PURGE_WATERMARK_INVALID');
+    assertCanonicalHash(watermark as { contentHash: Hash }, 'ERR_PURGE_WATERMARK_INVALID');
   }
 }
 
@@ -2070,17 +2193,122 @@ function assertMeta(meta: StoreMetaRecord | undefined, cursor: Cursor, epoch: nu
 }
 
 async function snapshotHash(tx: IDBTransaction): Promise<Hash> {
-  const roots: Record<string, unknown[]> = {};
+  const roots: Record<string, { readonly count: number; readonly digest: Hash }> = {};
   for (const storeName of ROOT_STORES) {
-    roots[storeName] = await requestValue<unknown[]>(tx.objectStore(storeName).getAll());
+    let count = 0;
+    let digest: Hash = sha256(`proagi-snapshot-root-v2:${storeName}`);
+    await scanStore(tx.objectStore(storeName), (key, value) => {
+      digest = hashCanonical({ previous: digest, key, value });
+      count += 1;
+    });
+    roots[storeName] = { count, digest };
   }
-  return hashCanonical(roots);
+  return hashCanonical({ schemaVersion: 'snapshot-v2', roots });
 }
 
-async function entries(store: IDBObjectStore): Promise<{ keys: IDBValidKey[]; values: unknown[] }> {
-  const keys = await requestValue<IDBValidKey[]>(store.getAllKeys());
-  const values = await requestValue<unknown[]>(store.getAll());
-  return { keys, values };
+function scanStore(store: IDBObjectStore, visit: (key: IDBValidKey, value: unknown) => void): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let count = 0;
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error ?? new M1bError('ERR_STORAGE'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(count);
+        return;
+      }
+      try {
+        visit(cursor.key, cursor.value);
+        count += 1;
+        cursor.continue();
+      } catch (error) {
+        reject(error);
+      }
+    };
+  });
+}
+
+interface DeletionWorkPage {
+  readonly items: readonly DeletionWorkItemRecord[];
+  readonly complete: boolean;
+}
+
+function deletionWorkPage(store: IDBObjectStore, deletionId: string, limit: number): Promise<DeletionWorkPage> {
+  return new Promise((resolve, reject) => {
+    const items: DeletionWorkItemRecord[] = [];
+    let checkingBoundary = false;
+    const request = store.index('byDeletionId').openCursor(IDBKeyRange.only(deletionId));
+    request.onerror = () => reject(request.error ?? new M1bError('ERR_STORAGE'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve({ items, complete: true });
+        return;
+      }
+      if (checkingBoundary) {
+        resolve({ items, complete: false });
+        return;
+      }
+      const item = cursor.value;
+      if (!isDeletionWorkItem(item) || item.deletionId !== deletionId) {
+        reject(new M1bError('ERR_STORAGE_CORRUPT'));
+        return;
+      }
+      items.push(item);
+      if (items.length >= limit) {
+        checkingBoundary = true;
+        cursor.continue();
+      } else cursor.continue();
+    };
+  });
+}
+
+interface CursorPage {
+  readonly entries: readonly { key: IDBValidKey; value: unknown }[];
+  readonly count: number;
+  readonly complete: boolean;
+  readonly lastKey?: string;
+}
+
+function assertPageLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new M1bError('ERR_PAGE_LIMIT_INVALID');
+}
+
+function cursorPage(store: IDBObjectStore, continuationKey: string | undefined, legacyOffset: number, limit: number): Promise<CursorPage> {
+  return new Promise((resolve, reject) => {
+    const page: Array<{ key: IDBValidKey; value: unknown }> = [];
+    let skippedLegacyOffset = continuationKey !== undefined || legacyOffset <= 0;
+    let lastKey: string | undefined;
+    let checkingBoundary = false;
+    const request = store.openCursor(continuationKey === undefined ? undefined : IDBKeyRange.lowerBound(continuationKey, true));
+    request.onerror = () => reject(request.error ?? new M1bError('ERR_STORAGE'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve({ entries: page, count: page.length, complete: true, ...(lastKey ? { lastKey } : {}) });
+        return;
+      }
+      if (!skippedLegacyOffset) {
+        skippedLegacyOffset = true;
+        cursor.advance(legacyOffset);
+        return;
+      }
+      if (checkingBoundary) {
+        resolve({ entries: page, count: page.length, complete: false, lastKey });
+        return;
+      }
+      if (typeof cursor.key !== 'string') {
+        reject(new M1bError('ERR_STORAGE_CORRUPT'));
+        return;
+      }
+      page.push({ key: cursor.key, value: cursor.value });
+      lastKey = cursor.key;
+      if (page.length >= limit) {
+        checkingBoundary = true;
+        cursor.continue();
+      } else cursor.continue();
+    };
+  });
 }
 
 function isOwnDeletionControl(store: PhysicalStoreName, key: IDBValidKey | undefined, value: unknown, journal: ActiveDeletionJournalRecord): boolean {
@@ -2088,6 +2316,21 @@ function isOwnDeletionControl(store: PhysicalStoreName, key: IDBValidKey | undef
   if (store === 'journal' && (String(key) === journal.id || String(key).startsWith(`work:${journal.id}:`))) return true;
   if (store === 'system' && (String(key) === journal.planId || String(key) === 'recovery-lease' || String(key).startsWith(`purge-ack:${journal.id}:`))) return true;
   return false;
+}
+
+function isDeletionWorkItem(value: unknown): value is DeletionWorkItemRecord {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<DeletionWorkItemRecord>;
+  return typeof candidate.id === 'string'
+    && candidate.id.startsWith('work:')
+    && typeof candidate.deletionId === 'string'
+    && typeof candidate.ordinal === 'string'
+    && /^\d+$/.test(candidate.ordinal)
+    && typeof candidate.storeName === 'string'
+    && typeof candidate.recordId === 'string'
+    && typeof candidate.estimatedBytes === 'number'
+    && Number.isSafeInteger(candidate.estimatedBytes)
+    && candidate.estimatedBytes >= 0;
 }
 
 function isPurgeAck(value: unknown): value is PurgeAckRecord {
@@ -2147,6 +2390,33 @@ function incrementCursor(cursor: Cursor): Cursor {
   return (BigInt(cursor) + 1n).toString();
 }
 
+function openDatabaseRequest(request: IDBOpenDBRequest, timeoutMs: number): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      callback();
+    };
+    request.onsuccess = () => {
+      if (timedOut) {
+        request.result.close();
+        return;
+      }
+      finish(() => resolve(request.result));
+    };
+    request.onerror = () => finish(() => reject(request.error ?? new M1bError('ERR_STORAGE')));
+    request.onblocked = () => undefined;
+    const timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      finish(() => reject(new M1bError('ERR_STORAGE_BLOCKED')));
+    }, timeoutMs);
+  });
+}
+
 function requestValue<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -2187,14 +2457,32 @@ function deleteDatabase(name: string): Promise<void> {
   });
 }
 
-function deleteDatabaseResult(name: string): Promise<boolean> {
+interface DeleteDatabaseResult {
+  readonly deleted: boolean;
+  readonly pending: boolean;
+  readonly settled: Promise<boolean>;
+}
+
+function deleteDatabaseResult(name: string, timeoutMs = DELETE_TIMEOUT_MS): Promise<DeleteDatabaseResult> {
+  let settleRequest!: (value: boolean) => void;
+  const settled = new Promise<boolean>((resolve) => { settleRequest = resolve; });
   return new Promise((resolve) => {
     const request = indexedDB.deleteDatabase(name);
-    let settled = false;
-    const settle = (value: boolean) => { if (!settled) { settled = true; resolve(value); } };
-    const timer = setTimeout(() => settle(false), DELETE_TIMEOUT_MS);
-    request.onsuccess = () => { clearTimeout(timer); settle(true); };
-    request.onerror = () => { clearTimeout(timer); settle(false); };
+    let timedOut = false;
+    let requestSettled = false;
+    const settle = (value: boolean) => {
+      if (requestSettled) return;
+      requestSettled = true;
+      clearTimeout(timer);
+      settleRequest(value);
+      if (!timedOut) resolve({ deleted: value, pending: false, settled });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      resolve({ deleted: false, pending: true, settled });
+    }, timeoutMs);
+    request.onsuccess = () => settle(true);
+    request.onerror = () => settle(false);
     request.onblocked = () => undefined;
   });
 }

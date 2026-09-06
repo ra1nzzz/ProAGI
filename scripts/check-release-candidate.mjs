@@ -18,11 +18,21 @@ const dirty = await git('status', '--porcelain=v1', '--untracked-files=all');
 if (dirty) throw new Error(`Release candidate worktree is dirty:\n${dirty}`);
 const ref = process.env.RELEASE_REF ?? process.env.GITHUB_REF ?? await git('describe', '--tags', '--exact-match', 'HEAD').then((tag) => `refs/tags/${tag}`).catch(() => '');
 if (!/^refs\/tags\/v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(ref)) throw new Error('Release verification requires an exact semantic-version tag refs/tags/vMAJOR.MINOR.PATCH');
+const packageJson = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8'));
+if (typeof packageJson.version !== 'string' || ref !== `refs/tags/v${packageJson.version}`) throw new Error(`Release tag ${ref} must exactly match package.json version ${packageJson.version}`);
 const tagSha = await git('rev-parse', '--verify', `${ref}^{commit}`).catch(() => '');
 if (!tagSha || tagSha !== head) throw new Error(`Release tag ${ref} does not resolve to HEAD ${head}`);
 
 const dist = resolve(repoRoot, 'dist');
 await access(dist);
+const PRODUCTION_FORBIDDEN_MARKERS = Object.freeze([
+  '__proagiE2e',
+  'commit:after-persisted',
+  'purge:before-release',
+  'importWithResponseLoss',
+  'deleteWithResponseLoss',
+  'VITE_PROAGI_E2E_HOOKS',
+]);
 const artifacts = [];
 async function walk(path) {
   const info = await lstat(path);
@@ -31,6 +41,9 @@ async function walk(path) {
     for (const name of (await readdir(path)).sort()) await walk(join(path, name));
   } else if (info.isFile()) {
     const bytes = await readFile(path);
+    const text = bytes.toString('utf8');
+    const marker = PRODUCTION_FORBIDDEN_MARKERS.find((candidate) => text.includes(candidate));
+    if (marker) throw new Error(`Production dist contains forbidden E2E marker ${marker}: ${relative(repoRoot, path)}`);
     artifacts.push({ path: relative(repoRoot, path), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
   }
 }

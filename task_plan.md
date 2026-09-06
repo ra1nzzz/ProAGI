@@ -21,13 +21,13 @@
    - 已按最终六件套完成 M1 synthetic Insight Loop 垂直切片
    - UI/UX 已对齐参考图的暖白 AppShell、六态球体与等价交互
 6. **验证与交付** — complete（Gate 1 CONDITIONAL）
-   - 57/57 Vitest、16/16 Chromium、typecheck/lint/CSP/audit/build 全部通过
+   - 98/98 Vitest、26/26 Chromium、2/2 smoke、nightly privacy 26/26、nightly worker 7/7、typecheck/lint/CSP/audit/build 全部通过
    - NVDA、人工视觉批准、hosted CI 与跨标签删除/PURGE 诚实保留 `NOT_RUN`
-7. **Quiescence / atomic verify hardening** — in_progress
+7. **Quiescence / atomic verify hardening** — complete（Gate 1 CONDITIONAL；release binding 需真实 semver tag CI）
    - 同 databaseName adapter 共享 RootCoordinator；root freeze hooks、mutation lease 与最终 readwrite Tv
    - terminal verification receipt 原子绑定 audit hash、root revision、journal hash、lease generation/token digest
    - durable purge watermark 与 frozen-tab visibility catch-up；补充 Playwright/response-loss/TOCTOU regression
-   - YT review、完整 release gate、原子 commit/push 后再完成本阶段
+   - 三维 YT review 与 PR/nightly gates 已完成；release binding 保留真实 semver tag CI 条件；本阶段以最终原子提交/push 交付
 
 ## 关键约束
 - deep-research 任意时刻并行 subagent ≤ 7；子代理不得再派子代理。

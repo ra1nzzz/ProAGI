@@ -116,6 +116,27 @@ describe('M1b deletion and recovery control plane', () => {
     }
   });
 
+  it('serializes concurrent same-token delete chunks without double-counting work', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    const linkedRecords = Array.from({ length: 8 }, (_, index) => toStoredRecord(`linked-${index}`, 'behavior_event', { target: target.recordId, index }, new Date(now).toISOString()));
+    await adapter.commit(makeBatch({
+      idempotencyKey: 'linked-events', expectedCursor: '1', expectedPrivacyEpoch: 0, storeNames: ['business'],
+      mutations: linkedRecords.map((record) => ({ kind: 'insertImmutable' as const, storeName: 'business' as const, record })),
+    }));
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'same-owner', now);
+    const deleting = await enumerateAll(adapter, fenced.journal, fenced.lease, now + 1);
+    const [first, second] = await Promise.all([
+      adapter.deleteChunk(deleting.id, 'same-owner', fenced.lease.fencingToken, 2, now + 2),
+      adapter.deleteChunk(deleting.id, 'same-owner', fenced.lease.fencingToken, 2, now + 2),
+    ]);
+    let current = first.progress.completedCount >= second.progress.completedCount ? first : second;
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'same-owner', fenced.lease.fencingToken, 2, now + 3);
+    expect(current.state).toBe('PURGE_PENDING');
+    expect(current.progress.completedCount).toBe(current.progress.totalCount);
+  });
+
   it('keeps a permanent deny digest after more than 32 purge watermarks and restart', async () => {
     const databaseName = 'permanent-purge-index-test';
     const adapter = new IndexedDbM1bAdapter(databaseName, () => now);
@@ -141,6 +162,47 @@ describe('M1b deletion and recovery control plane', () => {
       mutations: [{ kind: 'insertImmutable', storeName: 'business', record: resurrection }],
     }))).rejects.toMatchObject({ code: 'ERR_PURGED_REFERENCE' });
   }, 20_000);
+
+  it('uses bounded cursor continuation for large deletion enumeration pages', async () => {
+    const adapter = createAdapter();
+    const target = await seedTarget(adapter);
+    const linked = Array.from({ length: 150 }, (_, index) => toStoredRecord(`linked-${String(index).padStart(3, '0')}`, 'behavior_event', { linkedRecordId: target.recordId }));
+    await adapter.commit(makeBatch({
+      idempotencyKey: 'seed-large-linked-set', expectedCursor: '1', expectedPrivacyEpoch: 0, storeNames: ['business'],
+      mutations: linked.map((record) => ({ kind: 'insertImmutable' as const, storeName: 'business' as const, record })),
+    }));
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner', now);
+    const first = await adapter.enumerateDeletionPage(fenced.journal.id, fenced.lease.ownerClientId, fenced.lease.fencingToken, 2, now + 1);
+    const second = await adapter.enumerateDeletionPage(first.id, fenced.lease.ownerClientId, fenced.lease.fencingToken, 2, now + 1);
+    expect(second.enumeration.continuationKey).toBeDefined();
+    const deleting = await enumerateAll(adapter, second, fenced.lease, now + 1);
+    expect(deleting.state).toBe('DELETING');
+    const workItems = (await adapter.getAll('journal')).filter((record) => (record as { id?: string }).id?.startsWith(`work:${fenced.journal.id}:`) === true);
+    // business target + links, plus the linked head/ledger/change control records.
+    expect(workItems).toHaveLength(linked.length + 4);
+    expect(new Set(workItems.map((record) => (record as { id?: string }).id)).size).toBe(workItems.length);
+  });
+
+  it('fails closed when core metadata fields are malformed', async () => {
+    const adapter = createAdapter();
+    const baseline = await adapter.getMeta();
+    const cases: Record<string, unknown>[] = [
+      { cursor: 'not-a-cursor' },
+      { privacyEpoch: -1 },
+      { observationMode: 'BROKEN' },
+      { recoveryMode: 'BROKEN' },
+      { schemaVersion: '0.0.0' },
+      { logicalBytes: -1 },
+      { recoveryBytes: 5_242_881 },
+      { recoveryReserveBytes: 1 },
+    ];
+    for (const patch of cases) {
+      await mutateStoredRecord(adapter, 'meta', 'canonical', (value) => ({ ...value, ...patch }));
+      await expect(adapter.getMeta()).rejects.toMatchObject({ code: expect.stringMatching(/^ERR_(STORAGE_CORRUPT|PURGE_WATERMARK_INVALID)$/) });
+      await mutateStoredRecord(adapter, 'meta', 'canonical', () => ({ ...baseline }));
+    }
+  });
 
   it('rejects a post-verify resurrection that reuses a purged anchor', async () => {
     const adapter = createAdapter();
@@ -362,6 +424,21 @@ describe('M1b deletion and recovery control plane', () => {
     expect(current?.purge.requiredClientIds).toContain('client-a');
   });
 
+  it('does not evict a frozen quarantined client on lease expiry alone', async () => {
+    const adapter = createAdapter();
+    await adapter.registerClient('frozen-client', now);
+    const target = await seedTarget(adapter);
+    const plan = await adapter.planDeletion({ storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType });
+    const fenced = await adapter.fenceDeletion(plan, 'owner-a', now);
+    let current = await enumerateAll(adapter, fenced.journal, fenced.lease);
+    while (current.state === 'DELETING') current = await adapter.deleteChunk(current.id, 'owner-a', fenced.lease.fencingToken, 500, now + 1);
+    const pending = await adapter.sealAndAudit(current.id, 'owner-a', fenced.lease.fencingToken, now + 2);
+    expect(pending.outcome).toBe('CLIENTS_PENDING');
+    const takeover = await adapter.stealRecoveryLease('owner-b', now + 7_000);
+    const retried = await adapter.retryPurge(current.id, 'owner-b', takeover.fencingToken, [], now + 7_000);
+    expect(retried.purge.requiredClientIds).toContain('frozen-client');
+  });
+
   it('quarantines late clients and invalidates old ACKs after retryPurge', async () => {
     const adapter = createAdapter();
     await adapter.registerClient('client-a', now - 1);
@@ -440,6 +517,66 @@ describe('M1b deletion and recovery control plane', () => {
     expect(result.outcome).toBe('REGISTRY_INCOMPLETE');
     expect(result.registryComplete).toBe(false);
     expect(result.registryRevision).toBeDefined();
+  });
+
+  it('keeps the clear fence until a timed-out delete request settles', async () => {
+    const databaseName = `proagi-clear-pending-${crypto.randomUUID()}`;
+    const adapter = new IndexedDbM1bAdapter(databaseName, () => now);
+    adapters.push(adapter);
+    await adapter.open();
+    const blocker = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 4);
+      request.onerror = () => reject(request.error ?? new Error('raw blocker failed'));
+      request.onsuccess = () => resolve(request.result);
+    });
+    blocker.onversionchange = () => undefined;
+    const clearPromise = adapter.clearAll({ cachesCleared: true, deleteTimeoutMs: 50 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await expect(adapter.getMeta()).rejects.toMatchObject({ code: 'ERR_STORAGE_BLOCKED' });
+    const result = await clearPromise;
+    expect(result).toMatchObject({ state: 'BLOCKED', databaseDeleted: false, pendingDeletion: true });
+    blocker.close();
+    let reopened: Awaited<ReturnType<typeof adapter.getMeta>> | undefined;
+    for (let attempt = 0; attempt < 20 && !reopened; attempt += 1) {
+      try { reopened = await adapter.getMeta(); } catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
+    }
+    expect(reopened).toMatchObject({ cursor: '0' });
+    await expect(adapter.getAll('business')).resolves.toEqual([]);
+  });
+
+  it('times out a stuck quiescence drain without releasing the fence early', async () => {
+    const adapter = createAdapter();
+    const releaseMutation = adapter.beginInProcessRootMutation();
+    await expect(adapter.clearAll({ cachesCleared: true, simulateBlocked: true, quiescenceTimeoutMs: 10 })).rejects.toMatchObject({ code: 'ERR_PURGE_QUIESCENCE_TIMEOUT' });
+    releaseMutation();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(adapter.clearAll({ cachesCleared: true, simulateBlocked: true })).resolves.toMatchObject({ state: 'BLOCKED' });
+  });
+
+  it('drains deferred adapters when root freezing fails', async () => {
+    const databaseName = `proagi-freeze-failure-${crypto.randomUUID()}`;
+    const owner = new IndexedDbM1bAdapter(databaseName, () => now);
+    const sibling = new IndexedDbM1bAdapter(databaseName, () => now);
+    adapters.push(owner, sibling);
+    let throwOnFreeze = true;
+    let siblingFreezeCount = 0;
+    owner.registerInProcessRoot('owner-root', () => [], {
+      freeze: () => sibling.dispose(),
+      unfreeze: () => undefined,
+    });
+    owner.registerInProcessRoot('failing-root', () => [], {
+      freeze: () => { if (throwOnFreeze) throw new Error('synthetic freeze failure'); },
+      unfreeze: () => undefined,
+    });
+    sibling.registerInProcessRoot('sibling-root', () => [], {
+      freeze: () => { siblingFreezeCount += 1; },
+      unfreeze: () => undefined,
+    });
+    await expect(owner.clearAll({ cachesCleared: true, simulateBlocked: true })).rejects.toThrow('synthetic freeze failure');
+    expect(siblingFreezeCount).toBe(0);
+    throwOnFreeze = false;
+    await expect(owner.clearAll({ cachesCleared: true, simulateBlocked: true })).resolves.toMatchObject({ state: 'BLOCKED' });
+    expect(siblingFreezeCount).toBe(0);
   });
 
   it('reports clear blocking honestly and keeps CLEAR_ONLY', async () => {

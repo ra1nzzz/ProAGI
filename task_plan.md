@@ -20,9 +20,9 @@
 5. **开发实施** — complete
    - 已按最终六件套完成 M1 synthetic Insight Loop 垂直切片
    - UI/UX 已对齐参考图的暖白 AppShell、六态球体与等价交互
-6. **验证与交付** — complete（Gate 1 CONDITIONAL）
+6. **验证与交付** — complete（M1 人工验收 PASS；Gate 1 CONDITIONAL）
    - 98/98 Vitest、26/26 Chromium、2/2 smoke、nightly privacy 26/26、nightly worker 7/7、typecheck/lint/CSP/audit/build 全部通过
-   - NVDA、人工视觉批准、hosted CI 与跨标签删除/PURGE 诚实保留 `NOT_RUN`
+   - 用户已完成人工检查并标记 M1 浏览器研究原型通过；NVDA、hosted CI 与跨标签删除/PURGE 仍诚实保留 `NOT_RUN`
 7. **Quiescence / atomic verify hardening** — complete（Gate 1 CONDITIONAL；release binding 需真实 semver tag CI）
    - 同 databaseName adapter 共享 RootCoordinator；root freeze hooks、mutation lease 与最终 readwrite Tv
    - terminal verification receipt 原子绑定 audit hash、root revision、journal hash、lease generation/token digest

@@ -393,3 +393,10 @@
 - 验证器 registry 为每个命令配置超时与 TERM→KILL process-group 清理；GitHub Actions artifact retention 统一限制为 90 天，release candidate 仍要求真实 semver tag 与 clean HEAD。
 - 最终 PR gate：98/98 Vitest、26/26 Chromium、2/2 smoke、release gates 9/9、CSP/audit/build/production artifact 全部通过；nightly tier 13/13 命令通过（privacy 26/26、worker 7/7）。
 - Release tier 前 13 个命令已通过；第 14 个 release binding 因当前 checkout 无 `RELEASE_TARGET_SHA`/semver tag 而按设计拒绝，待真实 tag CI 运行；本轮最终原子 commit/push 作为交付动作。
+
+## M1 人工验收（2026-09-07）
+
+- 用户已对 `efa1ac7` 的浏览器版 M1 研究原型完成人工检查并标记 PASS（Approval ID: `M1-HUMAN-2026-09-07`）。
+- 该标记仅覆盖 M1 synthetic Insight Loop、AppShell/Orb、恢复、隐私、键盘与视觉检查；不代表全局桌面 Agent、UIA、Runtime 或真实动作已完成。
+- Gate 1 仍为 CONDITIONAL；NVDA、hosted CI 与跨标签删除/PURGE 继续保持 `NOT_RUN`。
+

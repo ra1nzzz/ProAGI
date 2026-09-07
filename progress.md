@@ -412,3 +412,16 @@
 - 新增 `tests/unit/ontologyExport.test.ts` 12 用例：schema 校验、environmentRef 覆盖、status 四态映射、确定性/冻结（显式导出无 I/O 无时钟）、YAML 转义。
 - 验证：typecheck 绿；`npm test` 108/108 全绿（含 shadow/preview-guard 无副作用断言）；新增文件 eslint --max-warnings 0 绿（仓库根 lint 报错来自既有未跟踪的网盘冲突副本脚本，与本次无关）。
 
+## Ontology 统一 Phase 3（Adopt）（2026-09-07）
+
+- 依据母仓路线图口径（同 OrchClaw 先例：路线图 §7 内部模型迁移 = Phase 3 Adopt）。§7 两项（Claim 信封、Skill 草稿）已在 Phase 2 前置落地；本阶段补齐剩余 canonical 实体采纳。
+- 新增导出（`src/export/`）：
+  - `episode.ts` — `exportEpisode(episode)`：Episode → canonical EpisodicMemory（MEMORY-SPEC §2，layer:"episodic"；eventRefs 复用 `observation:proagi:<eventId>`）。
+  - `artifact.ts` — `exportEvidenceArtifact(evidence, {uri?, verification?})`：EvidenceRef → Artifact(kind=evidence) 信封（ARTIFACT-SPEC §2，补齐 uri/hash/provenance 元数据；verification 默认 unverified，uri 仅调用方显式提供）；`exportReportArtifact(report, {uri?, verification?})`：DailyReportSnapshot → Artifact(kind=report)。
+  - `internal.ts` — EvidenceRef → canonical 证据指针共用助手（claim.ts 改为复用，行为不变）。
+  - `schemas.ts` — 新增 `canonicalArtifactSchema` / `canonicalEpisodicMemorySchema` / `canonicalVerificationSchema` 及 parse 助手。
+- 跨产品断言（迁移文档 §8）：InPeak 侧尚未落地 canonical Observation（母仓矩阵 P1 ⬜），本阶段无从断言，按提示词许可继续延迟至 PHASE 9；schema 已导出可复用。
+- 新增 `tests/unit/ontologyExportPhase3.test.ts` 5 用例（schema 校验/uri/verification 语义/确定性/冻结）。
+- 验证：typecheck 绿；`npm test` 113/113 全绿；新增文件 eslint 绿。
+- `docs/semantic-diff.md` 已更新（Episode/Evidence/DailyReportSnapshot 三行转 ✅，新增字段级差异与漂移风险条目）。
+

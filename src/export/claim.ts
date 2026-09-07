@@ -6,8 +6,9 @@
 // 导出只做信封投影，不改动本地版本化机制。
 // status 映射（canonical 无 rejected/invalidated 词汇，原值保留在 provenance.localStatus）：
 //   proposed -> proposed | confirmed -> confirmed | rejected -> refuted | invalidated -> refuted
-import type { EvidenceRef, WorkModelClaim } from '../domain/types';
-import type { CanonicalClaim, CanonicalClaimStatus, CanonicalEvidenceRef } from './types';
+import type { WorkModelClaim } from '../domain/types';
+import type { CanonicalClaim, CanonicalClaimStatus } from './types';
+import { toCanonicalEvidenceRef } from './internal';
 
 export function toCanonicalClaimStatus(status: WorkModelClaim['status']): CanonicalClaimStatus {
   switch (status) {
@@ -16,14 +17,6 @@ export function toCanonicalClaimStatus(status: WorkModelClaim['status']): Canoni
     case 'rejected':
     case 'invalidated': return 'refuted';
   }
-}
-
-function toCanonicalEvidenceRef(refs: readonly EvidenceRef[]): readonly CanonicalEvidenceRef[] {
-  return refs.map((evidence) => Object.freeze({
-    ref: `evidence:proagi:${evidence.entityType}/${evidence.entityId}`,
-    role: evidence.role,
-    entityHash: evidence.entityHash,
-  }));
 }
 
 export function exportClaim(claim: WorkModelClaim): CanonicalClaim {

@@ -1,7 +1,7 @@
-// Canonical export types (Ontology Phase 2, Compatible).
+// Canonical export types (Ontology Phase 2+3, Compatible/Adopt).
 // These shapes mirror the Canonical Ontology — they are EXPORT-ONLY projections.
 // 不得用这些类型替换内部模型（BehaviorEvent/WorkModelClaim/SkillCandidate 保留原名原义）。
-// ACTION-SPEC v0.1 §2 Observation · MEMORY-SPEC v0.1 §5 Claim 元模型。
+// ACTION-SPEC v0.1 §2 Observation · MEMORY-SPEC v0.1 §2/§5 · ARTIFACT-SPEC v0.1 §2 Artifact。
 import type { EventAttributes, EventKind, Hash } from '../domain/types';
 
 /** ACTION-SPEC §2 kind 全集；ProAGI Phase 2 仅产出 kind:"event"。 */
@@ -75,4 +75,64 @@ export interface CanonicalClaimProvenance {
   /** 本地原始 status（rejected/invalidated 映射为 canonical refuted，原文留档）。 */
   readonly localStatus: 'proposed' | 'confirmed' | 'rejected' | 'invalidated';
   readonly contentHash: Hash;
+}
+
+// ── Phase 3 (Adopt)：Artifact 信封（ARTIFACT-SPEC v0.1 §2）与 EpisodicMemory（MEMORY-SPEC v0.1 §2） ──
+
+/** ARTIFACT-SPEC §2 kind 全集中 ProAGI 导出涉及的子集。 */
+export type CanonicalArtifactKind =
+  | 'file' | 'document' | 'code' | 'dataset' | 'report' | 'image' | 'video'
+  | 'skill_package' | 'workflow_definition' | 'execution_trace' | 'evidence';
+
+/** ARTIFACT-SPEC §2 verification 块（OrchClaw 骨架 + Ordexa Validation）。 */
+export interface CanonicalVerification {
+  readonly status: 'unverified' | 'passed' | 'failed';
+  readonly method?: string;
+  readonly result?: string;
+}
+
+/** ARTIFACT-SPEC §2 provenance 块；canonical 字段之外一律收敛到 local。 */
+export interface CanonicalArtifactProvenance {
+  readonly createdBy: string;
+  readonly derivedFrom?: readonly string[];
+  /** 本地 EvidenceRef.transform（产出该实体的转换）留档。 */
+  readonly transform?: {
+    readonly name: string;
+    readonly version: string;
+    readonly inputHash: Hash;
+  };
+  /** 本地元数据留档（不进 canonical 词汇）。 */
+  readonly local: Record<string, string | number | boolean>;
+}
+
+/** ARTIFACT-SPEC §2 canonical Artifact 信封 —— 字段与规范一一对应。 */
+export interface CanonicalArtifact {
+  readonly id: string;
+  readonly kind: CanonicalArtifactKind;
+  /** 存储位置（file:// 等）；本地实体尚无物理落盘时整个字段省略。 */
+  readonly uri?: string;
+  /** 内容完整性哈希（entityHash / contentHash）。 */
+  readonly hash: Hash;
+  readonly verification: CanonicalVerification;
+  readonly provenance: CanonicalArtifactProvenance;
+}
+
+/** MEMORY-SPEC §2 EpisodicMemory 层投影（Episode 导出；事件引用复用 Phase 2 的 observation id）。 */
+export interface CanonicalEpisodicMemory {
+  readonly id: string;
+  readonly layer: 'episodic';
+  readonly title: string;
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly projectKey?: string;
+  readonly activityKind: string;
+  readonly eventRefs: readonly string[];
+  readonly evidence: readonly CanonicalEvidenceRef[];
+  readonly confidence: number;
+  readonly provenance: {
+    readonly product: 'proagi';
+    readonly localEpisodeId: string;
+    readonly segmentationVersion: string;
+    readonly contentHash: Hash;
+  };
 }

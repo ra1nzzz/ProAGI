@@ -400,3 +400,15 @@
 - 该标记仅覆盖 M1 synthetic Insight Loop、AppShell/Orb、恢复、隐私、键盘与视觉检查；不代表全局桌面 Agent、UIA、Runtime 或真实动作已完成。
 - Gate 1 仍为 CONDITIONAL；NVDA、hosted CI 与跨标签删除/PURGE 继续保持 `NOT_RUN`。
 
+## Ontology 统一 Phase 2（Compatible）（2026-09-07）
+
+- 执行 `prompts/PROAGI-UNIFICATION-PROMPT.md`（YT-Agent-Ontology）：只做导出层，不动 insightLoop/KnowledgePort/ShadowActionSink 内核。
+- 新增 `src/export/`（types/schemas/observation/claim/skillDraft + barrel）：
+  - `exportObservation(events, {environmentRef?})`：BehaviorEvent → canonical Observation（ACTION-SPEC v0.1 §2，kind:"event"，7 顶层字段严格对齐）。
+  - `exportClaim(claim)`：WorkModelClaim → canonical Claim 信封（MEMORY-SPEC v0.1 §5；rejected/invalidated → refuted，原值留 provenance.localStatus）。
+  - `exportSkillFrontmatterDraft(candidate)`：SkillCandidate → SKILL.md frontmatter 草稿（纯生成，status:draft，绝不发布；SkillCandidate ≠ Skill）。
+  - `canonicalObservationSchema`/`canonicalClaimSchema` zod schema 导出，供 InPeak 解析器复用（PHASE 9 跨产品断言）。
+- 新增 `docs/semantic-diff.md`（实体对照、状态词汇映射、漂移风险、禁区遵守记录）。
+- 新增 `tests/unit/ontologyExport.test.ts` 12 用例：schema 校验、environmentRef 覆盖、status 四态映射、确定性/冻结（显式导出无 I/O 无时钟）、YAML 转义。
+- 验证：typecheck 绿；`npm test` 108/108 全绿（含 shadow/preview-guard 无副作用断言）；新增文件 eslint --max-warnings 0 绿（仓库根 lint 报错来自既有未跟踪的网盘冲突副本脚本，与本次无关）。
+

@@ -172,6 +172,12 @@ test('runs the consent-bound readonly flow and records its pilot evidence state'
   const trace = (await readStore(page, 'audit')) as Array<Record<string, unknown>>;
   expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.shorten-retention' }) })]));
   expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'manual.check', manualCheck: expect.objectContaining({ caseId: 'M2.pilot', result: 'NOT_RUN' }) }) })]));
+
+  await traceDialog.getByLabel('用例').selectOption('M4.action-decision');
+  await traceDialog.getByLabel('步骤 token').fill('gate-4-decision');
+  await traceDialog.getByRole('button', { name: '写入 TRACE' }).click();
+  const updatedTrace = (await readStore(page, 'audit')) as Array<Record<string, unknown>>;
+  expect(updatedTrace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'manual.check', manualCheck: expect.objectContaining({ caseId: 'M4.action-decision', result: 'NOT_RUN' }) }) })]));
 });
 
 test('exports an explicitly confirmed redacted TRACE package', async ({ page }) => {

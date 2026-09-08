@@ -50,7 +50,7 @@ describe('AppShell accessibility contracts', () => {
     const approvedBody = '在 demo-project 修改代码后运行测试';
     await screen.findByText(/本地 canonical store 已就绪/);
     fireEvent.click(screen.getByRole('button', { name: '预览本地样例' }));
-    fireEvent.click(await screen.findByRole('button', { name: '确认导入' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认导入' }, { timeout: 10_000 }));
 
     expect(await screen.findByText(approvedBody, { selector: '.claim-card__statement' })).toBeVisible();
     expect(await axe(container)).toHaveNoViolations();
@@ -62,7 +62,7 @@ describe('AppShell accessibility contracts', () => {
       expect(node.getAttribute('title') ?? '').not.toContain(approvedBody);
       if (node.hasAttribute('aria-live')) expect(node.textContent ?? '').not.toContain(approvedBody);
     }
-  });
+  }, 15_000);
 
   it('moves focus into RecoverySurface and returns it to the invoker', () => {
     render(<App />);

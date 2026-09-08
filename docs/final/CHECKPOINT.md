@@ -255,7 +255,7 @@ Gate 3a 与 3b 分别 `PASS | CONDITIONAL | STOP`、分别回滚；任何一个�
 
 ### 8.2 裁决与证据
 
-证据包只裁决 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。`APPROVE_NEW_PRD` 也不代表已实现或验证动作；Gate 4 不接受 action demo 代替独立 PRD。
+证据包只裁决 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。当前准备材料与裁决见 [M4-ACTION-DECISION.md](M4-ACTION-DECISION.md)。`APPROVE_NEW_PRD` 也不代表已实现或验证动作；Gate 4 不接受 action demo 代替独立 PRD。
 
 ### 8.3 回滚
 

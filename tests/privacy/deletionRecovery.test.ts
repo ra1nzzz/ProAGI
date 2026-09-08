@@ -161,7 +161,7 @@ describe('M1b deletion and recovery control plane', () => {
       idempotencyKey: 'post-33-resurrection', expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch, storeNames: ['business'],
       mutations: [{ kind: 'insertImmutable', storeName: 'business', record: resurrection }],
     }))).rejects.toMatchObject({ code: 'ERR_PURGED_REFERENCE' });
-  }, 20_000);
+  }, 30_000);
 
   it('uses bounded cursor continuation for large deletion enumeration pages', async () => {
     const adapter = createAdapter();

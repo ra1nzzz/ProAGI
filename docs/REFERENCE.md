@@ -12,6 +12,7 @@
 | 架构与边界 | [final/ARCH.md](final/ARCH.md) | canonical store、Ports/Adapters、Shadow-only 和删除边界。 |
 | 里程碑与阶段顺序 | [final/PLAN.md](final/PLAN.md) | 固定 M1→M2→M3→M4→M5。 |
 | Gate、人工证据和放行 | [final/CHECKPOINT.md](final/CHECKPOINT.md) | `PASS/CONDITIONAL/FAIL/STOP` 与 Evidence Pack。 |
+| M4 动作裁决边界 | [final/M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md) | 只记录独立动作 PRD 的准入材料、TRACE case 和 `NEED_MORE_EVIDENCE` 裁决；不提供 live action。 |
 | 指标、pilot、fixture、命令 | [final/EVAL.md](final/EVAL.md) | synthetic 与真实价值分开。 |
 | 研究与引用汇总 | [research/deep-research-report.md](research/deep-research-report.md) | 研究原文链接和局限性记录。 |
 | 短期交接速记 | [../AGENTS.md](../AGENTS.md) | 只保留高频事实和核验命令，不承担完整产品合同。 |

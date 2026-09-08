@@ -26,7 +26,7 @@
 - TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 7/7、全量 fork 单测 161/161、双视口 E2E 32/32、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
-- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4、M5 尚未开始。
+- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
 
 ## 当前队列（只列未完成）
 
@@ -36,7 +36,7 @@
 | 0 | `Q-GATE-1` | Gate 1 外部人工/托管证据补齐 | `CONDITIONAL` | 自动化基线 | NVDA、人工视觉批准、托管 CI、跨标签协调等缺项有真实结果；每个 case 有 `PASS/FAIL/NOT_RUN` 和 artifact hash，禁止用 UI 成功文案替代。 |
 | 1 | `Q-M3-LIVE-EVAL` | 真实 provider/live-model evaluation | `NOT_RUN` | M2 pilot 结果、provider approval、出站 consent | 真实任务仅使用最小脱敏输入；记录 protocol/version、request/result hash、timeout/cancel、人工评审和模型价值；provider DTO 不进入 Core。 |
 | 1 | `Q-GATE-3` | Gate 3a/3b 独立裁决 | `CONDITIONAL` | Q-M3-LIVE-EVAL、TRACE 导出可核验 | Runtime 与 Projection 分别提交 contract/fault/live evidence；任一失败只回滚自身，不影响 Core；证据包由 TRACE 与 artifact manifest 互相回链。 |
-| 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `NOT_STARTED` | Gate 1–3 证据、真实价值需求 | 只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`；提交动作级威胁模型、consent/capability、幂等、前后置条件、undo/compensation、STOP 条件。当前 PRD 仍 Shadow-only。 |
+| 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `PREPARED / NEED_MORE_EVIDENCE / EXTERNAL` | Gate 1–3 证据、真实价值需求 | 见 [M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md)；只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。当前 PRD 仍 Shadow-only。 |
 | 3 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `NOT_STARTED` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
 
 ## 未来队列（依赖排序）
@@ -61,7 +61,7 @@
 | 缺真实参与者与真实来源 | Q-M2-PILOT、Gate 2 | 受控试点、明确 consent/retention/revoke、预注册方案与人工 TRACE 记录。 |
 | 真实模型任务尚未批准/运行 | Q-M3-LIVE-EVAL、Gate 3a | 通过 provider/出站边界审查并取得可核验的 live evidence。 |
 | Gate 1 的 NVDA、人工视觉、托管 CI 等证据不足 | Gate 1 不能升级为 `PASS` | 每个缺项真实执行并写入 `manual.check`，不能以自动化近似替代。 |
-| M4 尚无独立动作 PRD | 所有 live action | 完成新 PRD、威胁模型、evaluator 和五轮 review；在此之前保持 Shadow-only。 |
+| M4 尚无可批准的具体动作 PRD 与真实价值证据 | 所有 live action | 先完成 `Q-M2-PILOT`、`Q-M3-LIVE-EVAL` 和 Gate 1–3，再补动作级威胁模型、evaluator 与五轮 review；在此之前保持 Shadow-only。 |
 | M5 尚未建立 Tauri/EXE/UIA 交付链 | 原生常驻、EXE、桌面感知 | 前序 Gate 和 M4 允许后，建立可复现原生构建与窄 UIA 证据。 |
 
 ## 新灵感入队规则
@@ -76,4 +76,4 @@
 
 ## 下一步
 
-先准备 `Q-M2-PILOT` 的受控试点与 `Q-GATE-1` 人工 case 记录；TRACE 已提供统一核验与导出路径。不要在外部证据完成前扩大来源或实现真实动作。
+先准备 `Q-M2-PILOT` 的受控试点与 `Q-GATE-1` 人工 case 记录；随后补齐 M3 live-model 证据。TRACE 已提供统一核验与导出路径，M4 裁决材料见 [M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md)。不要在外部证据完成前扩大来源或实现真实动作。

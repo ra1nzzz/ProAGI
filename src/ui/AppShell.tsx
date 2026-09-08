@@ -42,6 +42,7 @@ const MANUAL_TRACE_CASES = [
   { value: 'M1c.visual', label: 'M1c · 人工视觉' },
   { value: 'M2.pilot', label: 'M2 · participant pilot' },
   { value: 'M3.live-model', label: 'M3 · live-model evaluation' },
+  { value: 'M4.action-decision', label: 'M4 · action decision' },
   { value: 'M5.native-smoke', label: 'M5 · native/EXE smoke' },
 ] as const;
 type ManualTraceCaseId = typeof MANUAL_TRACE_CASES[number]['value'];

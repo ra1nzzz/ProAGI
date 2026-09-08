@@ -1,6 +1,6 @@
 # M3 Runtime 与 Markdown Projection
 
-2026-09-08：按用户“推进 M3”继续工程实现。M2 participant pilot 仍为 NOT_RUN；本次不改变 Gate 2，也不宣称 Gate 3 全面放行。
+2026-09-08：M3a/M3b 工程实现已完成。M2 participant pilot 与真实 live-model evaluation `NOT_RUN`；本次不改变 Gate 2，也不宣称 Gate 3 全面放行。
 
 ## M3a Runtime
 
@@ -37,7 +37,7 @@ npm run smoke:runtime -- --endpoint ws://127.0.0.1:4513
 - `export()`：需独立 `projection.export`、用户确认当前内容 hash，以及不可撤回确认；持有 root mutation lease 至 artifact 交接，并复核 cursor/epoch/incarnation。返回 Markdown artifact，不自行触发下载或写 Obsidian vault。已下载副本不能远程撤回。
 - `disable()` 仅关闭本 adapter。本地读取、纠正和 Replay 继续工作。
 
-增量 change log 当前复用既有字符串游标索引并按数值排序；metadata-only cursor gap 保守触发全量重建。尚不新增 SQLite、持续 vault 同步、第二种投影或 OS 文件写入。UI 的 projection bridge 仅在 E2E build 存在，生产 artifact gate 检查其完全移除。
+增量 change log 当前复用既有字符串游标索引并按数值排序；metadata-only cursor gap 保守触发全量重建。生产 AppShell 提供 opt-in 重建、增量/全量重建、状态与 Markdown 预览，以及带 hash/不可逆确认的浏览器下载；投影异常只关闭投影。尚不新增 SQLite、持续 vault 同步、第二种投影或自动 OS/Vault 写入；E2E hook 仍仅在测试构建启用，生产 artifact gate 检查其移除。
 
 ```sh
 npm run test:projection
@@ -53,6 +53,6 @@ npx playwright test tests/e2e/m3-projection.spec.ts
 
 验证中发现既有 a11y 测试未等待数据库启动，已与集成测试统一就绪等待。首次 Chromium 桌面删除场景出现 runtime fault，失败 trace 保留于 `test-results/local-1788832116748-31796/`；补充错误码附件后两种视口各重复两次通过。另以确定性测试复现并修复 lease renewal 遇到正常 purge quiescence 被误判为致命故障，真正的 storage fault 仍保持阻断。Windows release-gates 为 8 PASS / 1 既有平台限定 SKIP；本轮不宣称完整 release gate PASS。
 
-最终代码验证：153/153 单测通过（`test-results/m3/final-unit-report.json`），锁定 Chromium 两个项目 2/2 通过（`test-results/local-1788832387637-6336/e2e/playwright-report.json`）；M2 精确文件评估 7/7。lint、TypeScript、production build 和 production artifact 检查通过。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
+最终代码验证：153/153 单测通过（`test-results/m3/final-unit-report.json`），M3b 生产入口锁定 Chromium 两个项目 2/2 通过（`test-results/local-1788832387637-6336/e2e/playwright-report.json`）；M2 精确文件评估 7/7。lint、TypeScript、production build 和 production artifact 检查通过。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
 
-Gate 3a / 3b 各自保持 CONDITIONAL；后续是受控真实模型任务验收、用户可用的独立设置/导出入口、M2 participant pilot。Runtime 可独立 dispose，Projection 可独立 disable；不会因一个子门通过而替另一个放行。M4 真实动作仍未实现。
+Gate 3a / 3b 各自保持 CONDITIONAL；后续是受控真实模型任务验收与 M2 participant pilot。Runtime 可独立 dispose，Projection 可独立 disable；不会因一个子门通过而替另一个放行。M4 真实动作仍未实现。

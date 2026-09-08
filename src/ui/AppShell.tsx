@@ -1,7 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createWindowRuntimeNotificationPort } from '../application/browserInsightRuntime';
 import type { BrowserInsightRuntime, BrowserRuntimeTestHooks } from '../application/browserInsightRuntime';
-import { createBrowserInsightRuntime } from '../application/browserRuntimeComposition';
+import { createBrowserInsightRuntime, DEFAULT_RUNTIME_DATABASE_NAME } from '../application/browserRuntimeComposition';
+import { IndexedDbM1bAdapter } from '../adapters/indexedDbM1b';
+import { MarkdownProjectionAdapter } from '../adapters/markdownProjection';
 import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTIME_SNAPSHOT_EVENT, type ExternalPurgeNotification, type PurgeCommittedNotification, type RuntimeErrorNotification, type RuntimeNotificationPort, type RuntimeSnapshotNotification } from '../application/ports';
 import type { ImportCommit } from '../application/insightService';
 import type { CorrectionAction } from '../domain/types';
@@ -73,8 +75,39 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const [eventTtlDays, setEventTtlDays] = useState(7);
   const [derivedTtlDays, setDerivedTtlDays] = useState(30);
   const readonlyFileRef = useRef<HTMLInputElement>(null);
+  const projectionStoreRef = useRef<IndexedDbM1bAdapter | null>(null);
+  const projectionRef = useRef<MarkdownProjectionAdapter | null>(null);
+  const projectionRequestRef = useRef(0);
+  const [projection, setProjection] = useState<MarkdownProjection | null>(null);
+  const [projectionEnabled, setProjectionEnabled] = useState(false);
+  const [projectionBusy, setProjectionBusy] = useState(false);
+  const [projectionError, setProjectionError] = useState<string | null>(null);
+  const [projectionExportOpen, setProjectionExportOpen] = useState(false);
+  const [projectionExportAcknowledged, setProjectionExportAcknowledged] = useState(false);
 
   const privateMode = canonicalPrivate;
+
+  const disposeProjection = useCallback(() => {
+    projectionRequestRef.current += 1;
+    projectionRef.current?.disable();
+    projectionRef.current = null;
+    projectionStoreRef.current?.dispose();
+    projectionStoreRef.current = null;
+    setProjection(null);
+    setProjectionEnabled(false);
+    setProjectionBusy(false);
+    setProjectionError(null);
+    setProjectionExportOpen(false);
+    setProjectionExportAcknowledged(false);
+  }, []);
+
+  const invalidateProjection = useCallback(() => {
+    projectionRequestRef.current += 1;
+    setProjection(null);
+    setProjectionBusy(false);
+    setProjectionExportOpen(false);
+    setProjectionExportAcknowledged(false);
+  }, []);
 
   useLayoutEffect(() => {
     let mounted = true;
@@ -82,6 +115,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     const handleExternalPurge = (event: Event) => {
       const detail = (event as CustomEvent<ExternalPurgeNotification>).detail;
       if (detail?.external !== false) uiEpochRef.current += 1;
+      disposeProjection();
       setImported(null);
       setReplaySnapshot(null);
       setPreviewToken(null);
@@ -102,10 +136,15 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       if (detail.imported !== undefined) {
         setImported(detail.imported);
         setReplaySnapshot(null);
+        invalidateProjection();
       }
-      if (detail.observationMode) setCanonicalPrivate(detail.observationMode === 'PRIVATE');
+      if (detail.observationMode) {
+        setCanonicalPrivate(detail.observationMode === 'PRIVATE');
+        if (detail.observationMode === 'PRIVATE') disposeProjection();
+      }
        if (detail.runtimeFaulted !== undefined) setRuntimeFaulted(detail.runtimeFaulted);
       if (detail.purge) {
+        disposeProjection();
         setReplaySnapshot(null);
         setPreviewToken(null);
         setPreviewBusy(false);
@@ -123,6 +162,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       const detail = (event as CustomEvent<RuntimeErrorNotification>).detail;
       if (!detail || typeof detail.code !== 'string' || typeof detail.operation !== 'string') return;
       uiEpochRef.current += 1;
+      disposeProjection();
       setRuntimeFaulted(true);
        setRecovery(detail.code.includes('PURGE') ? 'blocked' : 'recovery');
       setOrbState('ERROR');
@@ -141,7 +181,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       window.removeEventListener(RUNTIME_SNAPSHOT_EVENT, handleRuntimeSnapshot);
       window.removeEventListener(RUNTIME_ERROR_EVENT, handleRuntimeError);
     };
-  }, []);
+  }, [disposeProjection, invalidateProjection]);
 
   useLayoutEffect(() => {
     const callbacks = purgeCommitCallbacksRef.current.splice(0);
@@ -226,6 +266,11 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       active = false;
       window.clearTimeout(consentLoadTimer);
       closeProjection();
+      projectionRequestRef.current += 1;
+      projectionRef.current?.disable();
+      projectionRef.current = null;
+      projectionStoreRef.current?.dispose();
+      projectionStoreRef.current = null;
       uiEpochRef.current += 1;
       if (runtimeRef.current === runtime) runtimeRef.current = null;
        void runtime.close();
@@ -307,6 +352,99 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     }
   };
 
+  const getProjectionAdapter = (): MarkdownProjectionAdapter => {
+    let adapter = projectionRef.current;
+    if (!adapter) {
+      const store = new IndexedDbM1bAdapter(DEFAULT_RUNTIME_DATABASE_NAME);
+      adapter = new MarkdownProjectionAdapter(store);
+      projectionStoreRef.current = store;
+      projectionRef.current = adapter;
+    }
+    return adapter;
+  };
+
+  const rebuildProjection = async (forceFull = false) => {
+    const epoch = uiEpochRef.current;
+    if (runtimeFaulted) {
+      setProjectionError('ERR_RUNTIME_FAULTED');
+      return;
+    }
+    if (privateMode) {
+      setProjectionError('ERR_PRIVATE_MODE');
+      return;
+    }
+    if (!runtimeReady) {
+      setProjectionError('ERR_RUNTIME_UNAVAILABLE');
+      return;
+    }
+    const request = projectionRequestRef.current + 1;
+    projectionRequestRef.current = request;
+    setProjectionBusy(true);
+    setProjectionError(null);
+    try {
+      const next = await getProjectionAdapter().rebuild({ forceFull });
+      if (epoch !== uiEpochRef.current || request !== projectionRequestRef.current) return;
+      setProjection(next);
+      setProjectionEnabled(true);
+      setAnnouncement(`Markdown 投影已${forceFull ? '全量' : '增量'}重建，${next.documentCount} 个文档。`);
+    } catch (error) {
+      if (epoch !== uiEpochRef.current || request !== projectionRequestRef.current) return;
+      disposeProjection();
+      setProjectionError(safeErrorCode(error));
+      setAnnouncement('Markdown 投影已停用；canonical store 与 Insight Loop 未受影响。');
+    } finally {
+      if (epoch === uiEpochRef.current && request === projectionRequestRef.current) setProjectionBusy(false);
+    }
+  };
+
+  const openProjectionExport = () => {
+    if (!projection || !projectionRef.current || projectionBusy) return;
+    setProjectionExportAcknowledged(false);
+    setProjectionExportOpen(true);
+  };
+
+  const exportProjection = async () => {
+    const epoch = uiEpochRef.current;
+    const current = projection;
+    const adapter = projectionRef.current;
+    const request = projectionRequestRef.current;
+    if (!current || !adapter || !projectionExportAcknowledged) return;
+    setProjectionBusy(true);
+    try {
+      const artifact = await adapter.export({
+        capability: 'projection.export',
+        confirmedHash: current.contentHash,
+        acknowledgeIrrevocable: true,
+      });
+      if (epoch !== uiEpochRef.current || request !== projectionRequestRef.current) return;
+      const url = URL.createObjectURL(new Blob([artifact.markdown], { type: `${artifact.mediaType};charset=utf-8` }));
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = artifact.filename;
+        link.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      setProjection(artifact);
+      setProjectionExportOpen(false);
+      setProjectionExportAcknowledged(false);
+      setAnnouncement('Markdown 已导出为本地文件；应用不会自动写入 Obsidian Vault。');
+    } catch (error) {
+      if (epoch !== uiEpochRef.current || request !== projectionRequestRef.current) return;
+      disposeProjection();
+      setProjectionError(safeErrorCode(error));
+      setAnnouncement('Markdown 导出未完成；投影已停用，canonical store 未受影响。');
+    } finally {
+      if (epoch === uiEpochRef.current && request === projectionRequestRef.current) setProjectionBusy(false);
+    }
+  };
+
+  const disableProjection = () => {
+    disposeProjection();
+    setAnnouncement('Markdown 投影已禁用；canonical store 未改变。');
+  };
+
   const togglePrivacy = async () => {
     if (runtimeFaulted) {
       setDomainStatus('本地运行时需要先完成安全恢复；普通写入保持暂停。');
@@ -319,6 +457,9 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
         ? await runtimeRef.current!.pausePrivacy()
         : await runtimeRef.current!.resumePrivacy();
       if (epoch !== uiEpochRef.current) return;
+      if (nextMode === 'PRIVATE') {
+        disposeProjection();
+      }
       setCanonicalPrivate(nextMode === 'PRIVATE');
        if (nextMode === 'PRIVATE') {
         setPreviewToken(null);
@@ -367,7 +508,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
 
   const authorizeReadonlyFile = async () => {
     const file = readonlyFile;
-    const epoch = uiEpochRef.current;
+    const epoch = uiEpochRef.current + 1;
+    uiEpochRef.current = epoch;
     if (!file || !runtimeRef.current) return;
     if (!riskAccepted) { setDomainStatus('请先明确接受 local-first 剩余风险。'); return; }
     setReadonlyBusy(true);
@@ -395,6 +537,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     try {
       await runtimeRef.current?.revokeConsent();
       if (epoch !== uiEpochRef.current) return;
+      disposeProjection();
       setReadonlyConsent(null);
       setReadonlyFile(null);
       setImported(null);
@@ -409,6 +552,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const expireReadonly = async () => {
     try {
       const count = await runtimeRef.current?.expireReadonlyRetention();
+      invalidateProjection();
       setDomainStatus(`保留期清理完成：发现 ${count ?? 0} 条到期真实只读事件。`);
     } catch (error) {
       setDomainStatus(`保留期清理失败（${safeErrorCode(error)}）；未显示成功。`);
@@ -459,6 +603,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setImported(committed);
       setReplaySnapshot(null);
       setPreviewToken(null);
+      invalidateProjection();
       setDomainRevision((value) => value + 1);
       setOrbState(committed.output.claims.length ? 'SUGGESTION' : 'LEARNING');
       setDomainStatus(committed.source === 'readonly-test-results'
@@ -497,7 +642,10 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
         if (epoch !== uiEpochRef.current) return;
         setImported(snapshot.imported);
       }
-      if (result.ok) setReplaySnapshot(null);
+      if (result.ok) {
+        setReplaySnapshot(null);
+        invalidateProjection();
+      }
       setDomainRevision((value) => value + 1);
       setDomainStatus(result.ok
         ? (action === 'delete' ? 'Insight lineage 已从本地 canonical store 删除；无关事件与报告已保留。' : `${action} 已持久写入不可变 revision；可运行 Replay 验证。`)
@@ -777,6 +925,52 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               <div className="replay-result"><p><strong>修订前</strong> · {viewModel.replay.before}</p><p><strong>修订后</strong> · {viewModel.replay.after}</p></div>
             </div>
           )}
+        </section>
+
+        <section className="content-card projection-panel" aria-labelledby="projection-title">
+          <div className="section-heading">
+            <div><p className="section-number">06</p><h2 id="projection-title">本地知识投影</h2></div>
+            <span className="replay-status"><span aria-hidden="true">{projection ? '✓' : '○'}</span> {projection ? '已同步' : projectionEnabled ? '等待重建' : '未启用'}</span>
+          </div>
+          <p className="projection-panel__copy">按需把 canonical store 渲染为本地 Markdown 预览。投影是可删除的派生缓存，不改变 Insight Loop 的唯一真相。</p>
+          {projection ? (
+            <>
+              <dl className="projection-meta">
+                <div><dt>源 cursor</dt><dd>{projection.sourceCursor}</dd></div>
+                <div><dt>文档数</dt><dd>{projection.documentCount}</dd></div>
+                <div><dt>重建方式</dt><dd>{projection.mode === 'full' ? '全量' : '增量'}</dd></div>
+                <div><dt>privacy epoch</dt><dd>{projection.privacyEpoch}</dd></div>
+                <div><dt>内容哈希</dt><dd><code>{projection.contentHash}</code></dd></div>
+              </dl>
+              <pre className="projection-preview" aria-label="Markdown 投影预览">{projection.markdown}</pre>
+            </>
+          ) : (
+            <p className="projection-panel__empty">{projectionEnabled ? 'canonical store 已变化或投影尚未生成；请重建后再预览或导出。' : '投影默认关闭；启用后才会读取 canonical store 并生成本地预览。'}</p>
+          )}
+          <div className="button-row" aria-label="Markdown 投影操作">
+            {!projectionEnabled ? (
+              <button type="button" className="button button--primary" onClick={() => void rebuildProjection(true)} disabled={runtimeFaulted || privateMode || !runtimeReady || projectionBusy}>启用并重建投影</button>
+            ) : (
+              <>
+                <button type="button" className="button button--primary" onClick={() => void rebuildProjection(false)} disabled={runtimeFaulted || privateMode || projectionBusy}>增量重建</button>
+                <button type="button" className="button button--quiet" onClick={() => void rebuildProjection(true)} disabled={runtimeFaulted || privateMode || projectionBusy}>全量重建</button>
+                <button type="button" className="button button--quiet" onClick={disableProjection} disabled={projectionBusy}>禁用投影</button>
+              </>
+            )}
+            {projection ? <button type="button" className="button button--quiet" onClick={openProjectionExport} disabled={runtimeFaulted || privateMode || projectionBusy}>导出 Markdown</button> : null}
+          </div>
+          {projectionExportOpen && projection ? (
+            <fieldset className="projection-export">
+              <legend>确认导出 Markdown</legend>
+              <p>将下载 <code>proagi-knowledge.md</code> 到本地文件。应用不会自动写入 Obsidian Vault；导出的副本无法被应用远程撤回。</p>
+              <label className="checkbox-row"><input type="checkbox" checked={projectionExportAcknowledged} onChange={(event) => setProjectionExportAcknowledged(event.target.checked)} /> 我确认这是一次不可逆的本地文件导出。</label>
+              <div className="button-row">
+                <button type="button" className="button button--quiet" onClick={() => { setProjectionExportOpen(false); setProjectionExportAcknowledged(false); }} disabled={projectionBusy}>取消</button>
+                <button type="button" className="button button--primary" onClick={() => void exportProjection()} disabled={!projectionExportAcknowledged || projectionBusy || runtimeFaulted || privateMode}>确认导出</button>
+              </div>
+            </fieldset>
+          ) : null}
+          {projectionError ? <p className="projection-panel__error" role="status">投影已停用（{projectionError}）；canonical store 与 Insight Loop 未受影响。</p> : null}
         </section>
 
         {deleteConfirmOpen ? (

@@ -224,7 +224,7 @@ evidence/<milestone>/<run-id>/
 
 ## 7. Gate 3：M3 两个独立子门
 
-2026-09-08 工程进度：typed Runtime/fake/Codex adapter 与 Markdown/Obsidian projection 已落地，见 [M3-ADAPTERS.md](M3-ADAPTERS.md)。3a/3b 保持 `CONDITIONAL`：真实 provider smoke 目前只验证初始化握手，M2 participant pilot 与生产交互入口仍待完成。各自自动化报告不得被解读为阶段全面放行。
+2026-09-08 工程进度：typed Runtime/fake/Codex adapter 与 Markdown/Obsidian projection 已落地，见 [M3-ADAPTERS.md](M3-ADAPTERS.md)。生产 projection 入口已完成并以双视口 E2E 验证；3a/3b 仍保持 `CONDITIONAL`：真实 provider smoke 目前只验证初始化握手，M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`。各自自动化报告不得被解读为阶段全面放行。
 
 ### 7.1 Gate 3a — Runtime
 
@@ -237,6 +237,7 @@ evidence/<milestone>/<run-id>/
 
 - Markdown/Obsidian projection 可从 canonical store 重建；`sourceCursor` CAS 阻止旧结果覆盖新 head。
 - `loadChangesSince` 增量更新、全量 fallback、冲突检测与删除传播全过。
+- 生产入口可 opt-in 重建、预览、禁用并在 hash/不可逆确认后导出；M3b 生产流程双视口 E2E 通过。
 - 证据：projection contract/round-trip/delete/rebuild 报告；回滚为关闭 projection 并保留 canonical store。
 
 ### 7.3 独立裁决

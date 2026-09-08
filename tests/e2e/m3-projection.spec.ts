@@ -27,6 +27,13 @@ test('M3 Markdown matches full rebuild and follows canonical deletion across rel
   expect(delta.mode).toBe('incremental');
   expect(delta.markdown).toContain('user-confirmed');
   expect((await projection(page, true)).markdown).toBe(delta.markdown);
+  await page.getByRole('button', { name: '启用并重建投影' }).click();
+  await expect(page.locator('.projection-preview')).toContainText('ProAGI Knowledge');
+  await page.getByRole('button', { name: '导出 Markdown' }).click();
+  await page.getByRole('checkbox', { name: '我确认这是一次不可逆的本地文件导出。' }).check();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: '确认导出' }).click();
+  expect((await downloadPromise).suggestedFilename()).toBe('proagi-knowledge.md');
   await page.getByRole('button', { name: '删除 Insight' }).click();
   await page.getByRole('button', { name: '确认删除' }).click();
   try {
@@ -35,6 +42,10 @@ test('M3 Markdown matches full rebuild and follows canonical deletion across rel
     await testInfo.attach('runtime-error-codes', { body: JSON.stringify(await page.evaluate(() => (window as unknown as { runtimeErrors: unknown[] }).runtimeErrors)), contentType: 'application/json' });
     throw error;
   }
+  expect((await projection(page)).documentCount).toBe(0);
+  await expect(page.getByRole('button', { name: '启用并重建投影' })).toBeVisible();
+  await page.getByRole('button', { name: '启用并重建投影' }).click();
+  await expect(page.locator('.projection-meta')).toContainText('文档数0');
   expect((await projection(page)).documentCount).toBe(0);
   await page.reload();
   await expect(page.getByRole('button', { name: '运行 Replay' })).toBeEnabled();

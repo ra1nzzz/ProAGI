@@ -239,6 +239,16 @@ dd { margin: 5px 0 0; overflow-wrap: anywhere; line-height: 1.45; }
 .replay-result { display: grid; gap: 10px; }
 .replay-result p { margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; line-height: 1.5; }
 .replay-result p:last-child { border-left: 4px solid var(--success); background: #f5fbf7; }
+.projection-panel { display: grid; gap: 18px; }
+.projection-panel__copy, .projection-panel__empty, .projection-panel__error { margin: 0; color: var(--ink-muted); line-height: 1.55; }
+.projection-panel__error { color: var(--danger); font-weight: 700; }
+.projection-meta { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.projection-meta div { min-width: 0; padding: 12px; border-radius: 10px; background: #f5f6f8; }
+.projection-meta dd { overflow-wrap: anywhere; }
+.projection-preview { max-height: 360px; margin: 0; padding: 16px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; color: #314158; background: #f6f8fb; font: 0.8rem/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.projection-export { margin: 0; padding: 16px; border: 1px solid #e0aa5d; border-radius: 12px; background: #fff8ea; }
+.projection-export legend { padding: 0 6px; font-weight: 800; }
+.projection-export p { margin: 0 0 12px; color: var(--ink-muted); line-height: 1.55; }
 code { overflow-wrap: anywhere; color: #314158; }
 
 .empty-state { display: grid; place-items: start; min-height: 170px; margin-top: 18px; padding: 24px; border: 1px dashed var(--line-strong); border-radius: 12px; background: #faf9f6; }
@@ -335,6 +345,7 @@ code { overflow-wrap: anywhere; color: #314158; }
   .insight-grid { display: grid; grid-template-columns: 1fr; }
   .observed-panel, .learned-panel, .impact-panel, .inbox-panel { grid-column: 1; }
   .metric-grid, .claim-card dl, .replay-grid { grid-template-columns: 1fr; }
+  .projection-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .episode-list li { grid-template-columns: 1fr; gap: 6px; }
   .section-heading { align-items: flex-start; }
   .orb-dock { max-width: calc(100vw - 16px); }
@@ -363,7 +374,7 @@ code { overflow-wrap: anywhere; color: #314158; }
 
 @media (forced-colors: active) {
   :root { --canvas: Canvas; --surface: Canvas; --surface-raised: Canvas; --ink: CanvasText; --ink-muted: CanvasText; --line: ButtonText; --line-strong: ButtonText; --accent: Highlight; --focus-ring: Highlight; }
-  body, .today-panel, .privacy-strip, .demo-controls, .stale-banner, .recovery-surface, .content-card, .replay-panel, .inbox-list li { background: Canvas; color: CanvasText; box-shadow: none; }
+  body, .today-panel, .privacy-strip, .demo-controls, .stale-banner, .recovery-surface, .content-card, .replay-panel, .inbox-list li, .projection-preview, .projection-export { background: Canvas; color: CanvasText; box-shadow: none; }
   .orb__shell, .orb__rim, .orb__fluid { background: Canvas; border-color: ButtonText; box-shadow: none; }
   .orb__highlight, .orb__shadow, .orb__base-halo { display: none; }
   .orb__icon { color: ButtonText; text-shadow: none; }

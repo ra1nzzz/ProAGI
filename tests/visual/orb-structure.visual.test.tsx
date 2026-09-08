@@ -56,7 +56,7 @@ describe('mood-board visual structure', () => {
     expect(container.querySelector('.app-shell')).toBeInTheDocument();
     expect(container.querySelector('.privacy-strip')).toBeInTheDocument();
     expect(container.querySelector('.today-panel')).toBeInTheDocument();
-    expect(container.querySelectorAll('.content-card')).toHaveLength(4);
+    expect(container.querySelectorAll('.content-card')).toHaveLength(5);
     expect(container.querySelector('.replay-panel')).toBeInTheDocument();
 
     const orb = screen.getByRole('button', { name: '本地观察已就绪' });

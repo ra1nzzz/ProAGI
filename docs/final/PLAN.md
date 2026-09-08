@@ -8,7 +8,7 @@
 - canonical roadmap 顺序固定：**M1 npm + TypeScript/Web Insight Loop → M2 窄真实只读源 → M3 Runtime Adapter 与知识投影 → M4 真实动作独立 PRD 检查点 → M5 Tauri 壳与窄 Windows UIA**。M4 只做立项/停止裁决，不实现 live action。
 - 任一里程碑不得借用后续能力伪装完成当前阶段。
 - 评价口径统一引用 `docs/final/EVAL.md`；阶段放行统一引用 `docs/final/CHECKPOINT.md`。
-- **当前状态：M3 adapter 工程实现推进中 / Gate 3a、3b CONDITIONAL**。M1 人工验收 PASS，Gate 1 尚有外部验收条件；M2 已提交真实只读源与 consent/retention，participant pilot 仍为 NOT_RUN。2026-09-08 用户明确要求推进 M3，当前实现与待验收边界见 [M3-ADAPTERS.md](M3-ADAPTERS.md)，不因此升级 Gate 1/2。
+- **当前状态：M3a/M3b adapter 工程实现已完成 / Gate 3a、3b CONDITIONAL**。M1 人工验收 PASS，Gate 1 尚有外部验收条件；M2 已提交真实只读源与 consent/retention，participant pilot 仍为 NOT_RUN。M3b 已有生产 opt-in 预览/导出入口及双视口 E2E 证据；不因此升级 Gate 1/2 或宣称真实模型价值已验证。实现与待验收边界见 [M3-ADAPTERS.md](M3-ADAPTERS.md)。
 
 ## 1. 全程约束
 
@@ -241,6 +241,8 @@ npm run eval -- --suite runtime-isolation
 1. 实现 Markdown/Obsidian ProjectionPort adapter，但 canonical store 仍是唯一真相。
 2. 验证 `sourceCursor` CAS、`loadChangesSince` 增量更新、全量重建、冲突检测与删除传播。
 3. M3b 的失败只能关闭 projection，不得停止 M1/M2 本地纠正与 Replay。
+
+工程状态（2026-09-08）：以上 adapter 验收项已实现；生产 AppShell 已提供 opt-in 重建、预览、增量/全量重建、禁用与显式不可逆 Markdown 导出。Gate 仍受独立证据与上游 participant pilot 约束。
 
 ```bash
 npm run verify

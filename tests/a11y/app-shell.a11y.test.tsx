@@ -48,6 +48,7 @@ describe('AppShell accessibility contracts', () => {
   it('keeps approved local-sensitive body copy readable without spreading it into names or live regions', async () => {
     const { container } = render(<App />);
     const approvedBody = '在 demo-project 修改代码后运行测试';
+    await screen.findByText(/本地 canonical store 已就绪/);
     fireEvent.click(screen.getByRole('button', { name: '预览本地样例' }));
     fireEvent.click(await screen.findByRole('button', { name: '确认导入' }));
 

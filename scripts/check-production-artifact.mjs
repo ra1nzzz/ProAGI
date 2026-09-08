@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { access, lstat, readFile, readdir } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
-const repoRoot = resolve(new URL('..', import.meta.url).pathname);
+import { fileURLToPath } from 'node:url';
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const distRoot = resolve(repoRoot, 'dist');
 const forbiddenMarkers = Object.freeze([
   '__proagiE2e',
@@ -9,6 +10,7 @@ const forbiddenMarkers = Object.freeze([
   'purge:before-release',
   'importWithResponseLoss',
   'deleteWithResponseLoss',
+  'projectionRebuild',
   'VITE_PROAGI_E2E_HOOKS',
 ]);
 const artifacts = [];

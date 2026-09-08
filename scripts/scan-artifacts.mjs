@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import { access, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 
-const repoRoot = resolve(new URL('..', import.meta.url).pathname);
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const insideRepo = (candidate) => {
+  const path = relative(repoRoot, candidate);
+  return path !== '' && path !== '..' && !isAbsolute(path) && !path.startsWith(`..${sep}`);
+};
 const args = process.argv.slice(2);
 const valueFor = (name) => {
   const index = args.indexOf(name);
@@ -20,7 +25,7 @@ if (!rootArg) throw new Error('Usage: scan-artifacts.mjs --root <evidence-pack> 
 if (!SAFE_ID.test(runId)) throw new Error('EVIDENCE_RUN_ID contains unsafe characters');
 const root = resolve(repoRoot, rootArg);
 const quarantine = quarantineArg ? resolve(repoRoot, quarantineArg) : resolve(repoRoot, 'evidence', 'quarantine', runId);
-if (!root.startsWith(`${repoRoot}/`) || !quarantine.startsWith(`${repoRoot}/`)) throw new Error('Artifact paths must remain inside repository root');
+if (!insideRepo(root) || !insideRepo(quarantine)) throw new Error('Artifact paths must remain inside repository root');
 
 const explicitCanaries = (process.env.EVIDENCE_CANARY_VALUES ?? '')
   .split(',')
@@ -93,7 +98,7 @@ async function scanArtifactTree() {
 
 const result = await scanArtifactTree();
 const reportPath = reportArg ? resolve(repoRoot, reportArg) : (await exists(root) ? resolve(root, 'artifact-scan.json') : undefined);
-if (reportPath && !reportPath.startsWith(`${repoRoot}/`)) throw new Error('Artifact scan report must remain inside repository root');
+if (reportPath && !insideRepo(reportPath)) throw new Error('Artifact scan report must remain inside repository root');
 if (result.status === 'QUARANTINED' || result.status === 'MISSING') {
   await mkdir(quarantine, { recursive: true });
   const receipt = {

@@ -136,6 +136,13 @@ test('runs the consent-bound readonly flow and records its pilot evidence state'
   await consent.getByRole('checkbox').check();
   await consent.getByRole('button', { name: '授权并预览' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('真实只读来源预览已准备');
+  const consentDetails = page.locator('details.consent-details');
+  await expect(consentDetails).toBeVisible();
+  await consentDetails.locator('summary').click();
+  await expect(consentDetails).toContainText('readonly-test-results');
+  await expect(consentDetails).toContainText('local-sensitive');
+  await expect(consentDetails).toContainText('事件 7 天 · 派生 30 天');
+  await expect(consentDetails).toContainText('sourceItemKey');
   expect(await readStore(page, 'business')).toEqual([]);
 
   await page.getByRole('button', { name: '确认导入' }).click();

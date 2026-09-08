@@ -849,6 +849,20 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
           </div>
         </section>
 
+        {readonlyConsent?.grant && !readonlyConsent.revoked ? (
+          <details className="consent-details">
+            <summary>查看当前真实只读授权边界</summary>
+            <dl className="consent-details__grid">
+              <div><dt>来源</dt><dd>readonly-test-results（用户主动选择）</dd></div>
+              <div><dt>数据分类</dt><dd>local-sensitive</dd></div>
+              <div><dt>用途</dt><dd>{readonlyConsent.grant.purpose}</dd></div>
+              <div><dt>保留策略</dt><dd>事件 {readonlyConsent.policy.eventTtlDays} 天 · 派生 {readonlyConsent.policy.derivedTtlDays} 天</dd></div>
+            </dl>
+            <p className="consent-details__fields">字段白名单<code>{readonlyConsent.grant.allowedFields.join(' · ')}</code></p>
+            <p className="consent-details__notice">当前来源只读、Shadow-only；不联网、不注入输入、不自动写入外部文件。撤回授权会删除该来源的事件与派生 lineage。</p>
+          </details>
+        ) : null}
+
         {readonlyConsentOpen && readonlyFile ? (
           <section className="stale-banner" role="dialog" aria-modal="true" aria-labelledby="readonly-consent-title">
             <div>

@@ -131,6 +131,14 @@ main {
 .status-dot { width: 12px; height: 12px; flex: 0 0 auto; border: 3px solid var(--surface); border-radius: 50%; box-shadow: 0 0 0 2px currentColor; }
 .status-dot--safe { color: var(--success); background: currentColor; }
 .status-dot--private { color: var(--state-private); background: currentColor; }
+.consent-details { padding: 14px 18px; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-soft); }
+.consent-details summary { cursor: pointer; font-weight: 780; }
+.consent-details[open] summary { margin-bottom: 14px; }
+.consent-details__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.consent-details__grid div { min-width: 0; padding: 10px; border-radius: 10px; background: #f5f6f8; }
+.consent-details__grid dd { overflow-wrap: anywhere; }
+.consent-details__fields, .consent-details__notice { margin: 12px 0 0; color: var(--ink-muted); line-height: 1.55; }
+.consent-details__fields code { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 
 .button, .text-button, .segmented-control button, .state-picker button, .orb-tools button {
   min-height: 44px;
@@ -344,6 +352,7 @@ code { overflow-wrap: anywhere; color: #314158; }
   main > * + * { margin-top: 14px; }
   .privacy-strip, .demo-controls, .stale-banner, .recovery-surface { align-items: flex-start; flex-direction: column; }
   .demo-controls { display: flex; }
+  .consent-details__grid { grid-template-columns: 1fr; }
   .privacy-strip__actions, .privacy-strip__actions .button { width: 100%; }
   .insight-grid { display: grid; grid-template-columns: 1fr; }
   .observed-panel, .learned-panel, .impact-panel, .inbox-panel { grid-column: 1; }
@@ -377,7 +386,7 @@ code { overflow-wrap: anywhere; color: #314158; }
 
 @media (forced-colors: active) {
   :root { --canvas: Canvas; --surface: Canvas; --surface-raised: Canvas; --ink: CanvasText; --ink-muted: CanvasText; --line: ButtonText; --line-strong: ButtonText; --accent: Highlight; --focus-ring: Highlight; }
-  body, .today-panel, .privacy-strip, .demo-controls, .stale-banner, .recovery-surface, .content-card, .replay-panel, .inbox-list li, .projection-preview, .projection-export { background: Canvas; color: CanvasText; box-shadow: none; }
+  body, .today-panel, .privacy-strip, .consent-details, .demo-controls, .stale-banner, .recovery-surface, .content-card, .replay-panel, .inbox-list li, .projection-preview, .projection-export { background: Canvas; color: CanvasText; box-shadow: none; }
   .orb__shell, .orb__rim, .orb__fluid { background: Canvas; border-color: ButtonText; box-shadow: none; }
   .orb__highlight, .orb__shadow, .orb__base-halo { display: none; }
   .orb__icon { color: ButtonText; text-shadow: none; }

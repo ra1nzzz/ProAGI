@@ -40,6 +40,7 @@
 
 - `scripts/pilot-evidence.mjs` 严格校验 participant/session token、consent 生命周期、retention、纠正结果与 NetValue；拒绝未知字段、自由文本和原始工作内容。
 - 生成 participant-level 汇总、确定性 bootstrap 95% 区间、报告 content hash、artifact hash、TRACE binding 和 payload-free 运行日志；默认不产生 `PASS`，真实 pilot 仍在 ROADMAP。
+- 真实浏览器中的 consent→preview→commit→revoke/delete 路径已在两个 Chromium 视口各通过 1/1，并记录 `M2.pilot` `NOT_RUN` TRACE；这不是 participant pilot 结果。
 - 依据与实现：[final/EVAL.md](final/EVAL.md)、`scripts/pilot-evidence.mjs`、`scripts/tests/pilot-evidence.test.mjs`。
 
 ### `C-M3A-RUNTIME` — typed Runtime/fake/Codex adapter 工程
@@ -70,7 +71,7 @@
 ## 验证摘要
 
 - Fork pool 单测：160/160 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
-- Chromium 双视口 E2E：30/30 通过；包含人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `303478ed0a3b1fc961737642b51406e3e24dc536ffb4c3ac478cbdd58e0c0d19`。
+- Chromium 双视口 E2E：32/32 通过；包含 M2 consent/revoke/delete、人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `7971e9479a6ad842940a366f842427f1907ce4ab0c9c6a910d97c79a6293419b`。
 - M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
 - Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

@@ -23,7 +23,7 @@
 ## 当前状态
 
 - 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现。
-- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；TRACE 单测 7/7、全量 fork 单测 160/160、双视口 E2E 30/30、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
+- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；TRACE 单测 7/7、全量 fork 单测 160/160、双视口 E2E 32/32、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
 - M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4、M5 尚未开始。

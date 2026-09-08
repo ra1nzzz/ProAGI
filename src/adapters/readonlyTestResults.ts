@@ -1,18 +1,13 @@
 import { sha256 } from '../domain/canonical';
 import {
   materializeReadonlyBehaviorEvents, parseReadonlyInput, READONLY_ADAPTER_ID, READONLY_ADAPTER_VERSION,
-  type ReadonlyInputOptions, type ReadonlyMaterializationOptions, type ReadonlyParseResult,
+  type ReadonlyInputOptions, type ReadonlyMaterializationOptions,
 } from '../domain/readonlySource';
-import type { BehaviorEvent, Hash } from '../domain/types';
-
-export interface ReadonlyAdapterPreview {
-  readonly inputHash: Hash;
-  readonly parsed: ReadonlyParseResult;
-  readonly events: readonly BehaviorEvent[];
-}
+import type { ReadonlyAdapterPreview, ReadonlyObservationAdapter } from '../application/ports';
+export type { ReadonlyAdapterPreview } from '../application/ports';
 
 /** M2's one real-source adapter; raw source bytes never leave preview ownership. */
-export class ReadonlyTestResultsAdapter {
+export class ReadonlyTestResultsAdapter implements ReadonlyObservationAdapter {
   readonly id = READONLY_ADAPTER_ID;
   readonly version = READONLY_ADAPTER_VERSION;
 

@@ -1,5 +1,6 @@
 import type { ReplaySnapshotV1 } from '../domain/replay';
-import type { BehaviorEvent, CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import type { ReadonlyInputOptions, ReadonlyMaterializationOptions, ReadonlyParseResult } from '../domain/readonlySource';
 import type { CorrectionResult } from './knowledge';
 import type { ImportCommit } from './insightService';
 import type { PreviewReceipt } from './previewGuard';
@@ -69,6 +70,17 @@ export interface ObservationPreviewDTO {
 export interface ObservationPort {
   preview(): Promise<ObservationPreviewDTO>;
   commit(token: string): Promise<ImportCommit>;
+}
+
+export interface ReadonlyAdapterPreview {
+  readonly inputHash: Hash;
+  readonly parsed: ReadonlyParseResult;
+  readonly events: readonly BehaviorEvent[];
+}
+export interface ReadonlyObservationAdapter {
+  readonly id: string;
+  readonly version: string;
+  preview(utf8: string, options: ReadonlyInputOptions & ReadonlyMaterializationOptions): ReadonlyAdapterPreview;
 }
 
 export interface CorrectionPort {

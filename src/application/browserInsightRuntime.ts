@@ -3,7 +3,7 @@ import type { AtomicMutationBatch, StoredRecord } from './storageContracts';
 import { hashCanonical, sha256 } from '../domain/canonical';
 import type { BehaviorEvent, CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import { runInsightLoop } from '../domain/insightLoop';
-import { ReadonlyTestResultsAdapter } from '../adapters/readonlyTestResults';
+import type { ReadonlyObservationAdapter } from './ports';
 import { makeConsentGrant, makeConsentRevocation, makeRetentionPolicy, type ConsentGrant, type ConsentRevocation, type ReadonlyConsentSnapshot, type RetentionPolicy } from './m2Consent';
 import { developerDayFixtureJson } from '../fixtures/developerDay';
 import type { CorrectionResult } from './knowledge';
@@ -123,6 +123,7 @@ export interface BrowserRuntimeTestHooks {
 export interface BrowserInsightRuntimeOptions {
   readonly adapterFactory: () => RuntimeStoragePort;
   readonly serviceFactory: () => InsightServicePort;
+  readonly readonlyAdapter: ReadonlyObservationAdapter;
   readonly channelFactory?: () => BroadcastChannel | null;
   readonly clientIdFactory?: () => string;
   readonly clock?: () => number;
@@ -139,7 +140,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private readonly clientId: string;
   private readonly purgeChannel: BroadcastChannel | null;
   private readonly serviceFactory: () => InsightServicePort;
-  private readonly readonlyAdapter = new ReadonlyTestResultsAdapter();
+  private readonly readonlyAdapter: ReadonlyObservationAdapter;
   private readonly notificationPort: RuntimeNotificationPort;
   private readonly clock: () => number;
   private readonly scheduler: BrowserRuntimeScheduler;
@@ -206,6 +207,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.testHooks = options.testHooks ?? {};
     this.adapterFactory = options.adapterFactory;
     this.serviceFactory = options.serviceFactory;
+    this.readonlyAdapter = options.readonlyAdapter;
     this.notificationPort = options.notificationPort ?? NOOP_RUNTIME_NOTIFICATION_PORT;
     this.clock = options.clock ?? Date.now;
     this.scheduler = options.scheduler ?? DEFAULT_RUNTIME_SCHEDULER;

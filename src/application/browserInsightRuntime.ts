@@ -311,6 +311,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 
   private reportBackgroundFailure(operation: string, error: unknown): void {
+    if (isBenignRuntimeError(error)) return;
     this.latchRuntimeFault(error);
     const detail: RuntimeErrorNotification = { operation, code: runtimeErrorCode(error), runtimeFaulted: this.runtimeFaulted };
     this.notificationPort.publishError(detail);
@@ -526,6 +527,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.enforcePurgeFence();
       const consent = await this.loadReadonlyConsent();
       if (!consent || consent.revoked) throw new Error('ERR_CONSENT_STALE');
+      if (consent.grant.source.adapterId !== this.readonlyAdapter.id || consent.grant.source.adapterVersion !== this.readonlyAdapter.version) throw new Error('ERR_CONSENT_SCOPE');
       if (input.sourceItemKey !== undefined && input.sourceItemKey !== consent.grant.source.sourceItemKey) throw new Error('ERR_CONSENT_SCOPE');
       if (this.imported || this.pendingPreview) throw new Error('ERR_PREVIEW_ALREADY_EXISTS');
       const now = readM2Clock(this.clock);
@@ -1391,6 +1393,7 @@ const RUNTIME_ERROR_DISPOSITION: Readonly<Record<string, RuntimeErrorDisposition
   ERR_PRIVACY_MODE: 'expected',
   ERR_PRIVACY_MODE_ACTIVE: 'expected',
   ERR_PURGE_IN_PROGRESS: 'expected',
+  ERR_PURGE_QUIESCED: 'expected',
   ERR_PURGE_CLIENTS_PENDING: 'expected',
   ERR_PURGE_GENERATION_STALE: 'expected',
   ERR_PURGE_SEALED: 'expected',

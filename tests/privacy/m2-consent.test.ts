@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ReadonlyTestResultsAdapter } from '../../src/adapters/readonlyTestResults';
 import { IndexedDbM1bAdapter } from '../../src/adapters/indexedDbM1b';
 import { createBrowserInsightRuntime } from '../../src/application/browserRuntimeComposition';
 import type { BrowserInsightRuntime } from '../../src/application/browserInsightRuntime';
@@ -21,6 +22,20 @@ function sourceJson() {
 }
 
 describe('M2 consent and retention', () => {
+  it.each(['id', 'version'] as const)('does not transfer persisted consent to a replacement adapter %s', async (field) => {
+    const name = `m2-adapter-scope-${crypto.randomUUID()}`;
+    const first = createBrowserInsightRuntime({ adapterFactory: () => new IndexedDbM1bAdapter(name), channelFactory: () => null });
+    runtimes.push(first);
+    await first.grantReadonlyConsent({ sourceItemKey: 'source-a' });
+    await first.close();
+    const original = new ReadonlyTestResultsAdapter();
+    const preview = vi.fn(() => { throw new Error('Raw input reached the replacement'); });
+    const replacement = { id: original.id, version: original.version, preview, [field]: 'replacement' };
+    const next = createBrowserInsightRuntime({ adapterFactory: () => new IndexedDbM1bAdapter(name), channelFactory: () => null, readonlyAdapter: replacement });
+    runtimes.push(next);
+    await expect(next.previewReadonly({ utf8: sourceJson(), sourceItemKey: 'source-a' })).rejects.toThrow('ERR_CONSENT_SCOPE');
+    expect(preview).not.toHaveBeenCalled();
+  });
   it('commits a readonly source with 7/30 day metadata and deletes its lineage on revocation', async () => {
     const clock = () => Date.parse('2026-01-02T10:00:00Z');
     const adapter = new IndexedDbM1bAdapter(`m2-consent-${crypto.randomUUID()}`, clock);

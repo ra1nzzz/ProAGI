@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BrowserInsightRuntime } from '../../src/application/browserInsightRuntime';
 import { createBrowserInsightRuntime } from '../../src/application/browserRuntimeComposition';
 import { CommitResponseLostError } from '../../src/application/storageContracts';
@@ -19,6 +19,28 @@ afterEach(async () => {
 });
 
 describe('BrowserInsightRuntime application ports', () => {
+  it('treats a lease renewal blocked by the purge barrier as expected, but still reports storage faults', async () => {
+    const adapter = new IndexedDbM1bAdapter(`runtime-renew-${crypto.randomUUID()}`);
+    const errors: unknown[] = [];
+    let renew!: () => void;
+    const runtime = createBrowserInsightRuntime({
+      adapterFactory: () => adapter, channelFactory: () => null,
+      notificationPort: notificationPort(errors, []),
+      scheduler: { setTimeout, clearTimeout, clearInterval: () => undefined, setInterval: ((callback: () => void) => { renew = callback; return 1; }) as typeof setInterval },
+    });
+    runtimes.push(runtime);
+    await runtime.start();
+    const renewal = vi.spyOn(adapter, 'renewClient').mockRejectedValue(new Error('ERR_PURGE_QUIESCED'));
+    renew();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(renewal).toHaveBeenCalledTimes(1);
+    expect((await runtime.snapshot()).runtimeFaulted).toBe(false);
+    expect(errors).toHaveLength(0);
+    renewal.mockRejectedValue(new Error('ERR_STORAGE_WRITE'));
+    renew();
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0]).toMatchObject({ code: 'ERR_STORAGE_WRITE', runtimeFaulted: true });
+  });
   it('reports malformed cross-tab payloads without throwing from the event boundary', async () => {
     const adapter = new IndexedDbM1bAdapter(`runtime-protocol-${crypto.randomUUID()}`);
     const channel = Object.assign(new EventTarget(), { close: () => undefined });

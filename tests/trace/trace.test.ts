@@ -52,15 +52,23 @@ describe('local TRACE diagnostics', () => {
   it('records manual evidence as metadata and keeps sink failures non-fatal', async () => {
     const recorder = new TraceRecorder({ appendTraceEvents: async () => { throw new Error('sink unavailable'); } }, () => Date.parse('2026-09-08T00:00:00.000Z'), 'manual-test');
     const record = await recorder.recordManualCheck({
-      caseId: 'AC-15', stepId: 'logs-redacted', reviewerId: 'reviewer-1', result: 'PASS',
+      caseId: 'M1c.visual', stepId: 'logs-redacted', reviewerId: 'reviewer-1', result: 'PASS',
       correlationId: 'corr-2', artifactHashes: ['sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
     });
     expect(record.payload.manualCheck).toEqual({
-      caseId: 'AC-15', stepId: 'logs-redacted', reviewerId: 'reviewer-1', result: 'PASS',
+      caseId: 'M1c.visual', stepId: 'logs-redacted', reviewerId: 'reviewer-1', result: 'PASS',
       artifactHashes: ['sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
     });
     await expect(recorder.flush()).resolves.toBeUndefined();
     expect(recorder.snapshot()).toHaveLength(1);
+  });
+
+  it('rejects manual checks outside the pre-registered case set', () => {
+    const recorder = new TraceRecorder(undefined, () => Date.parse('2026-09-08T00:00:00.000Z'), 'manual-case');
+    expect(() => recorder.recordManualCheck({
+      caseId: 'unregistered-case', stepId: 'step', reviewerId: 'reviewer-1', result: 'NOT_RUN',
+      correlationId: 'corr-unknown', artifactHashes: [],
+    })).toThrow('ERR_TRACE_MANUAL_CASE_UNKNOWN');
   });
 
   it('stores TRACE in the existing audit store with TTL and byte/count boundaries', async () => {

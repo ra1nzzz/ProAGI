@@ -9,6 +9,14 @@ export const TRACE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const TRACE_MAX_RECORDS = 2_048;
 export const TRACE_MAX_BYTES = 1024 * 1024;
 export const TRACE_MAX_MEMORY_RECORDS = 512;
+export const TRACE_MANUAL_CASE_IDS = Object.freeze([
+  'M1c.nvda',
+  'M1c.visual',
+  'M2.pilot',
+  'M3.live-model',
+  'M4.action-decision',
+  'M5.native-smoke',
+] as const);
 
 export const TRACE_EVENT_NAMES = Object.freeze([
   'runtime.start',
@@ -282,6 +290,7 @@ function assertManualCheck(value: unknown): asserts value is TraceManualCheck {
   const candidate = value as Record<string, unknown>;
   if (Object.keys(candidate).some((key) => !['caseId', 'stepId', 'reviewerId', 'result', 'artifactHashes'].includes(key))) throw new Error('ERR_TRACE_FIELD_FORBIDDEN');
   for (const key of ['caseId', 'stepId', 'reviewerId']) if (typeof candidate[key] !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(candidate[key] as string)) throw new Error('ERR_TRACE_MANUAL_INVALID');
+  if (!TRACE_MANUAL_CASE_IDS.includes(candidate.caseId as typeof TRACE_MANUAL_CASE_IDS[number])) throw new Error('ERR_TRACE_MANUAL_CASE_UNKNOWN');
   if (!['PASS', 'FAIL', 'NOT_RUN'].includes(String(candidate.result))) throw new Error('ERR_TRACE_MANUAL_INVALID');
   if (!Array.isArray(candidate.artifactHashes) || candidate.artifactHashes.length > 32 || candidate.artifactHashes.some((hash) => typeof hash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(hash))) throw new Error('ERR_TRACE_MANUAL_INVALID');
 }

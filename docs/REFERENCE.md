@@ -28,7 +28,7 @@
 | M2 participant pilot 取证 | `scripts/pilot-evidence.mjs`、[final/EVAL.md](final/EVAL.md) | [final/CHECKPOINT.md](final/CHECKPOINT.md) 的 Evidence Pack 规则与本项目 TRACE contract | 采用严格 token/数值字段、participant-level 汇总、artifact hash、命令日志和 `manual.check` binding；工具只整理真实输入，不生成参与者结果或自动放行。 |
 | Markdown/Obsidian projection | `src/adapters/markdownProjection.ts` | [Obsidian Properties](https://help.obsidian.md/properties) | 参考人机可读、原子属性与 Markdown 生态；canonical truth 仍是 IndexedDB，不自动写 Vault。 |
 | provenance 与 lineage | `docs/final/SPEC.md`、`src/domain/` | [W3C PROV-O](https://www.w3.org/TR/prov-o/) | 参考 Entity/Activity/Agent provenance 关系；仓库使用自己的版本化、删除和 scope 契约。 |
-| 数据最小化与保留 | M2 consent/retention 实现 | [GDPR Article 5](https://eur-lex.europa.eu/eli/reg/2016/679/oj) | 参考 data minimisation；不是法律合规认证，local-first 也不等于静态加密。 |
+| 数据最小化与保留 | `src/application/browserInsightRuntime.ts`、`src/domain/readonlySource.ts`、`tests/privacy/m2-consent.test.ts` | [GDPR Article 5](https://eur-lex.europa.eu/eli/reg/2016/679/oj) | 参考 data minimisation；RetentionPolicy 只能通过 CAS 缩短，旧预览按新 TTL 校验，策略缩短/到期复用删除协议；不是法律合规认证，local-first 也不等于静态加密。 |
 | 用户信任、解释与纠正 | AppShell、Insight/Correction/Replay | [Guidelines for Human-AI Interaction](https://doi.org/10.1145/3290605.3300233)、[Algorithm Aversion](https://pubmed.ncbi.nlm.nih.gov/25401381/) | 参考可解释、可纠正和信任校准；当前产品不以接受率替代价值证据。 |
 | 置信度与选择性输出 | `docs/final/EVAL.md` | [On Calibration of Modern Neural Networks](https://proceedings.mlr.press/v70/guo17a.html) | 参考 calibration/selective risk 评价；阈值属于待 pilot 验证假设。 |
 | 受约束的自进化 | 北极星长期队列 `F-EVOLUTION` | [Darwin Gödel Machine paper](https://arxiv.org/abs/2505.22954)、[DGM](https://github.com/jennyzzt/dgm) | 参考“候选修改→经验验证→保留/回滚”思想；不把在线自修改、模型权重训练或自博弈列为当前能力。 |
@@ -41,7 +41,7 @@
 
 ## 来源快照与冲突裁决
 
-- 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复与授权边界展示已提交于 commit `b1b490e`（其 tree 为 `4622db37c51adc1f872d82994f1f6c6c2bd57190`）；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变实现边界。
+- 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示和 retention shortening 已提交于 commit `023e2e7`（其 tree 为 `6d6e8de4782d33c7b659b3c185744b3603e6226d`）；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变实现边界。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。
 - `AGENTS.md` 是交接速记，不与 ROADMAP/COMPLETED/REFERENCE 竞争；它只回链本知识库。

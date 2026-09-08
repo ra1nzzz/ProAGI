@@ -31,7 +31,8 @@
 
 ### `C-M2-READONLY-ENGINEERING` — consent-bound 窄只读源工程
 
-- `readonly-test-results` adapter、ConsentGrant/Revocation、字段白名单、preview/commit 双校验、event/derived TTL、retention expiry 和撤权删除路径。
+- `readonly-test-results` adapter、ConsentGrant/Revocation、字段白名单、preview/commit 双校验、event/derived TTL、用户可缩短的 CAS retention policy、retention expiry 和撤权删除路径。
+- 策略缩短会取消待提交预览、禁止延长（除非重新 consent）、按新 TTL 计算到期并复用 DeletionPlan/journal；只读事件内部临时字段不会穿透持久化 schema，重载恢复可严格校验。
 - 输入范围是用户主动选择的测试结果 JSON；不监听桌面、不联网、不注入输入、不执行动作。
 - 真实 participant pilot、NetValue 与 Gate 2 仍未完成，保留在 ROADMAP 的 `Q-M2-PILOT`。
 - 依据：[final/M2-READONLY-DATA-PACK.md](final/M2-READONLY-DATA-PACK.md)、[final/EVAL.md](final/EVAL.md)、M2 集成测试。
@@ -70,8 +71,8 @@
 
 ## 验证摘要
 
-- Fork pool 单测：160/160 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
-- Chromium 双视口 E2E：32/32 通过；包含 M2 consent/revoke/delete、授权边界展示、人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `d316e33a63bc7dc1b168ad061f60bb8ec0a55a51264ec4a679d26fcf1f23f583`。
+- Fork pool 单测：161/161 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
+- Chromium 双视口 E2E：32/32 通过；包含 M2 consent/revoke/delete、授权边界展示、保留期缩短、人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `2d2540e1237ca11417aefe0c8e0ad44cf4551e8954f1e9f804255d6256bcc043`。
 - M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
 - Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

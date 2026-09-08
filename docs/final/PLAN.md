@@ -3,7 +3,9 @@
 ## 0. 文档定位
 
 - 本计划将宏大的 Personal Agent OS 愿景收敛为可验证、可回滚的增量路线。
+- 北极星目标：持续记录用户电脑使用习惯，识别、分析并归类不同时间与不同工作任务中的操作，持续自学习、自进化，成为终身陪伴性 Agent，最终走向 AGI Agent；本计划只定义当前可验证的阶段，不把北极星当作已交付能力。
 - 产品名统一为 **ProAGI Assistant**；首个产品切片称 **ProAGI Insight Loop**。
+- 项目级未完成队列、已完成模块和来源映射见 [../ROADMAP.md](../ROADMAP.md)、[../COMPLETED.md](../COMPLETED.md)、[../REFERENCE.md](../REFERENCE.md)。
 - 核心证明不是“Agent 点对一次按钮”，而是“用户纠正后，同类输入不再产生同一知识错误”。
 - canonical roadmap 顺序固定：**M1 npm + TypeScript/Web Insight Loop → M2 窄真实只读源 → M3 Runtime Adapter 与知识投影 → M4 真实动作独立 PRD 检查点 → M5 Tauri 壳与窄 Windows UIA**。M4 只做立项/停止裁决，不实现 live action。
 - 任一里程碑不得借用后续能力伪装完成当前阶段。

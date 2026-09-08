@@ -1,6 +1,7 @@
 # ProAGI Assistant 产品需求文档（精炼版）
 **产品品牌**：ProAGI Assistant  
 **核心能力**：ProAGI Insight Loop  
+**北极星目标**：持续记录用户电脑使用习惯，识别、分析并归类不同时间与不同工作任务中的操作，持续自学习、自进化，成为终身陪伴性 Agent，最终走向 AGI Agent。
 **文档状态**：可进入首个研究切片设计与实现  
 **范围原则**：本地优先、事件白名单、证据优先、用户可纠正、版本不可变、Shadow-only
 ---
@@ -372,6 +373,6 @@ M1a Core/Oracle、M1b Persistence/Delete/Worker/Projection、M1c UI/A11y/Visual 
 - M4 决策门：知识版本、Replay 和跨投影一致性稳定后，只决定是否另立真实动作 PRD；不实施 live action。
 - M5：在前置门满足后评估 Tauri + 窄 Windows UIA。
 - 任何真实执行探索：必须移出本 PRD，重新评审权限、幂等、前后置条件、补偿和隔离 evaluator。
-ProAGI Assistant 的长期方向仍是把个人 Experience、Knowledge、Skills、Workflows、Policies 与 Evaluations 沉淀为用户可拥有、可迁移的 Personal Agent Experience Graph。
+ProAGI Assistant 的长期方向仍是把个人 Experience、Knowledge、Skills、Workflows、Policies 与 Evaluations 沉淀为用户可拥有、可迁移的 Personal Agent Experience Graph，并沿着上方北极星目标逐层扩大能力。
 但当前唯一承诺是：
 > 先把“白名单事件 → 可纠正 Insight → 版本 → Replay”做对，并始终保持 Shadow-only。

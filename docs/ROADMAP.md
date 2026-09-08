@@ -23,7 +23,7 @@
 ## 当前状态
 
 - 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现。
-- 当前工作分支 `feature/trace-evidence` 正在补 TRACE 诊断与人工核验闭环；单测/静态检查已有通过证据，但 Chromium 的 TRACE 导出用例仍出现 `ERR_EXPORT_STALE`，不能移入 COMPLETED。
+- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；TRACE 单测 7/7、全量 fork 单测 160/160、双视口 E2E 30/30、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
 - M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4、M5 尚未开始。
 
@@ -31,13 +31,12 @@
 
 | 顺序 | ID | 模块/目标 | 状态 | 依赖 | 完成定义与 TRACE 证据 |
 | --- | --- | --- | --- | --- | --- |
-| 0 | `Q-TRACE-01` | TRACE 记录、导出与人工核验闭环 | `IN_PROGRESS` | 现有 IndexedDB/audit、Runtime、Projection | 修复并通过真实 Chromium 导出；`manual.check` 记录 case/step/reviewer/result/artifact hash；导出前明确确认，内容无原始输入/路径/动态字段；记录命令、结果码和 artifact hash。 |
-| 1 | `Q-M2-PILOT` | 一个窄真实只读源的 participant pilot | `NOT_RUN / EXTERNAL` | M1 必要证据、ConsentGrant、RetentionPolicy、受控参与者 | 至少 12 名目标开发者、每人 2 次同类会话；记录 consent、preview/commit/revoke/retention、纠正耗时、退出/忽略、NetValue 与置信区间；所有人工步骤写入 TRACE。 |
-| 1 | `Q-GATE-1` | Gate 1 外部人工/托管证据补齐 | `CONDITIONAL` | 自动化基线 | NVDA、人工视觉批准、托管 CI、跨标签协调等缺项有真实结果；每个 case 有 `PASS/FAIL/NOT_RUN` 和 artifact hash，禁止用 UI 成功文案替代。 |
-| 2 | `Q-M3-LIVE-EVAL` | 真实 provider/live-model evaluation | `NOT_RUN` | M2 pilot 结果、provider approval、出站 consent | 真实任务仅使用最小脱敏输入；记录 protocol/version、request/result hash、timeout/cancel、人工评审和模型价值；provider DTO 不进入 Core。 |
-| 2 | `Q-GATE-3` | Gate 3a/3b 独立裁决 | `CONDITIONAL` | Q-M3-LIVE-EVAL、TRACE 导出可核验 | Runtime 与 Projection 分别提交 contract/fault/live evidence；任一失败只回滚自身，不影响 Core；证据包由 TRACE 与 artifact manifest 互相回链。 |
-| 3 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `NOT_STARTED` | Gate 1–3 证据、真实价值需求 | 只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`；提交动作级威胁模型、consent/capability、幂等、前后置条件、undo/compensation、STOP 条件。当前 PRD 仍 Shadow-only。 |
-| 4 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `NOT_STARTED` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
+| 0 | `Q-M2-PILOT` | 一个窄真实只读源的 participant pilot | `NOT_RUN / EXTERNAL` | M1 必要证据、ConsentGrant、RetentionPolicy、受控参与者 | 至少 12 名目标开发者、每人 2 次同类会话；记录 consent、preview/commit/revoke/retention、纠正耗时、退出/忽略、NetValue 与置信区间；所有人工步骤写入 TRACE。 |
+| 0 | `Q-GATE-1` | Gate 1 外部人工/托管证据补齐 | `CONDITIONAL` | 自动化基线 | NVDA、人工视觉批准、托管 CI、跨标签协调等缺项有真实结果；每个 case 有 `PASS/FAIL/NOT_RUN` 和 artifact hash，禁止用 UI 成功文案替代。 |
+| 1 | `Q-M3-LIVE-EVAL` | 真实 provider/live-model evaluation | `NOT_RUN` | M2 pilot 结果、provider approval、出站 consent | 真实任务仅使用最小脱敏输入；记录 protocol/version、request/result hash、timeout/cancel、人工评审和模型价值；provider DTO 不进入 Core。 |
+| 1 | `Q-GATE-3` | Gate 3a/3b 独立裁决 | `CONDITIONAL` | Q-M3-LIVE-EVAL、TRACE 导出可核验 | Runtime 与 Projection 分别提交 contract/fault/live evidence；任一失败只回滚自身，不影响 Core；证据包由 TRACE 与 artifact manifest 互相回链。 |
+| 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `NOT_STARTED` | Gate 1–3 证据、真实价值需求 | 只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`；提交动作级威胁模型、consent/capability、幂等、前后置条件、undo/compensation、STOP 条件。当前 PRD 仍 Shadow-only。 |
+| 3 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `NOT_STARTED` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
 
 ## 未来队列（依赖排序）
 
@@ -58,7 +57,6 @@
 
 | 阻塞项 | 影响 | 解除条件 |
 | --- | --- | --- |
-| TRACE 导出仍有 `ERR_EXPORT_STALE` | Q-TRACE-01、人工证据导出 | 固定 cursor/trace flush 顺序并通过 Chromium 两视口；失败记录不得删除。 |
 | 缺真实参与者与真实来源 | Q-M2-PILOT、Gate 2 | 受控试点、明确 consent/retention/revoke、预注册方案与人工 TRACE 记录。 |
 | 真实模型任务尚未批准/运行 | Q-M3-LIVE-EVAL、Gate 3a | 通过 provider/出站边界审查并取得可核验的 live evidence。 |
 | Gate 1 的 NVDA、人工视觉、托管 CI 等证据不足 | Gate 1 不能升级为 `PASS` | 每个缺项真实执行并写入 `manual.check`，不能以自动化近似替代。 |
@@ -77,4 +75,4 @@
 
 ## 下一步
 
-先完成 `Q-TRACE-01` 的根因修复和双视口证据，再同步人工核验模板；之后准备 M2 participant pilot，而不是扩大来源或实现真实动作。
+先准备 `Q-M2-PILOT` 的受控试点与 `Q-GATE-1` 人工 case 记录；TRACE 已提供统一核验与导出路径。不要在外部证据完成前扩大来源或实现真实动作。

@@ -140,6 +140,12 @@ interface EvaluatorManifestV1 {
 
 Artifact MUST 按 `TestArtifactSinkRegistryV1` 穷尽登记 `json-report | junit | console | screenshot | visual-diff | video | HAR | trace | source-map | reporter-attachment | CI-upload | NVDA-transcript`；每项记录 artifact hash、classification、canary scan、owner、tier、retention policy 与销毁 receipt。保留期固定为：PR 14 天、nightly 90 天、release Evidence Pack 长期保留并按项目归档策略显式销毁。任何 canary 命中先进入隔离区，禁止公开上传、链接或普通下载；只保留无 payload incident/销毁 receipt。失败 artifact 不得因失败被静默删除，但必须先完成 redaction/canary quarantine。
 
+### 3.4 人工核验与 TRACE 闭环
+
+每个需要人工判断的 case MUST 使用预注册的 `caseId/stepId`，通过 Application 的 `recordManualCheck` 写入 `trace_event_v1`；结果只能是 `PASS | FAIL | NOT_RUN`，审核人只能写 token，artifact 只能写 SHA-256。人工结果不得只存在于聊天、截图文件名、UI toast 或未签名表格中。`NOT_RUN` 必须保留原因所在的外部 Evidence Pack 链接，但不得把原因正文写入 TRACE。
+
+人工核验完成后，操作者 MUST 先准备 TRACE 预览，核对事件数量、classification、无原始输入/路径/动态字段，再明确确认不可逆本地导出。导出的 `contentHash`、artifact hash、命令退出码、环境和 `manual.check` correlationId 必须可互相追溯；后续诊断事件只属于下一次快照，不得修改已确认包。TRACE 是证据索引和脱敏诊断，不替代 NVDA、视觉批准、participant pilot 或真实 live-model 操作本身。
+
 Fixture reset MUST 清空前一个用例的 IndexedDB、Cache Storage、内存/Worker/search/projection cache、import staging、索引、定时器、BroadcastChannel 测试连接、announcement queue 与 UI 状态，并重建已知初始 `StoreMeta.cursor/privacyEpoch/recoveryMode/observationMode`。涉及删除的 fixture MUST 在输入 artifact 声明 journal 初态，预期终态只写入 Gold；涉及 consent/retention/PRIVATE 的 fixture MUST 声明 scenario。禁止测试代码从被测输出反推期望。
 
 ---

@@ -40,8 +40,8 @@
 
 ## 来源快照与冲突裁决
 
-- 本次知识库更新前的代码基线：commit `c9984d3af3a38fd35e6070ff2fbd3eba7e02be56`，tree `f8ca4ec7b5e573bc17c3947ec20e6baee9accae5`。
-- 更新时工作树包含未提交的 TRACE 实现与既有用户工件；未提交内容不被本文件伪装成已发布版本。`dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交。
+- 当前实现基线：TRACE 实现已提交于 commit `c303e0acc38f6fa4bd9071a40700be8d1f24b7bd`，其 tree 为 `fab43061ae81c8e7206782a2cadc56800b2e64f5`；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变实现边界。
+- `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。
 - `AGENTS.md` 是交接速记，不与 ROADMAP/COMPLETED/REFERENCE 竞争；它只回链本知识库。
 - `evidence/`、`evidence-logs/`、`test-results/` 是运行证据/生成物，不是需求或架构真相；其状态只能通过 manifest、命令退出码和 TRACE/artifact hash 引用。

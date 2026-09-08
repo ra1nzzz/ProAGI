@@ -306,6 +306,9 @@ PRIVATE capability matrix：拒绝 observation import、Runtime submit 和新 ac
 `AuditEvent` 只记录 actor、capability、固定 operation、resultCode、correlationId 和时间，不复制业务 payload或 target/content ID。普通 correction audit 可与业务 batch 原子提交；删除完成后的 audit 只能使用随机 deletion marker。Debug log 不属于 canonical state；Audit/日志有 TTL、条数和字节上限。
 核心指标包括导入/拒绝/redaction/未知 schema 数、claim/evidence 完整率、correction 类型、Replay/Projection 耗时、cursor/epoch conflict、非 verified journal、补偿次数、逻辑 IDB 字节预算和删除残留。Raw Screenshot At Rest 必须为 0；网络门禁只统计 Shadow 调用图可达的未授权外部调用，不把同源静态资源、canonical IDB 或用户显式导出误算为动作。
 M1 只有本地、allowlisted diagnostics sink，不设 Telemetry Port、不上传。开发模式可由 ControlPort 显式导出脱敏诊断包；未来 opt-in 遥测必须另立 sink/policy 且只能发送聚合指标。
+
+当前实现将诊断事件固定为 `trace_event_v1`，复用既有 `audit` object store：持久化保留 30 天、最多 2048 条且不超过 1 MiB，内存队列最多 512 条；sink 写入失败只保留有界 pending 队列，不能使 Core 业务失败。事件允许的动态值仅为固定 schema 的错误码、结果码、算法 pin、粗粒度计数和 `manual.check` 的 `caseId/stepId/reviewerId/result/artifactHashes`。人工核验入口只接受 token 与 SHA-256，不接受正文、路径、截图内容或自由文本。
+TRACE 导出先生成不可变预览快照，再要求用户明确确认和匹配 `contentHash`，下载为 `proagi-trace.json`；后续异步诊断事件不改写已确认快照。PRIVATE、撤权、清空、关闭或新增人工核验会使待确认快照失效；导出后的本地文件不能被应用远程撤回。`manual.check` 不能替代实际人工操作，必须与对应 artifact/环境/命令记录互相回链。
 ## 17. 性能与容量预算
 指标、采样和阈值的唯一来源是 EVAL §13；ARCH 不另设硬 p95。冻结基线前结果均为 `[STAT]`，不得抵消 `[INV]`。
 - PR gate 跑 1k/10k 小样本、Long Task、golden 和 O(n²) 比率；nightly/release 才跑 50k、完整冷启动/30 次样本与高 fan-out。

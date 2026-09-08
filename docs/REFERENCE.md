@@ -44,6 +44,7 @@
 ## 来源快照与冲突裁决
 
 - 本次知识库维护的输入快照为 commit `ec5ad146ea4e49b2b85b68d6eb86cf6aa69106a9`、tree `cb73d86e5b02e3eabec1ea7fd6f89eaa746a4e27`；本次只更新 ROADMAP/COMPLETED/REFERENCE 的目标、队列、状态与回链，不改变实现或外部证据状态。
+- 跨标签状态传播与删除/PURGE 的本地 Chromium 证据由测试提交 `a42511fd79a4a69583660101bcf2d737566e809c`、tree `0da5c1845ab8ad493d4d4f669c5a4aea411d987b` 提供；该提交只增加 E2E 断言，不扩大 hosted CI、独立进程或人工 Gate 结论。
 - 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示、retention shortening、M4 action-decision TRACE 入口和预注册 case 校验已提交于 commit `8a6eb08`（其 tree 为 `5753e347077131b968ad9f02f1eaaaa2bb816d64`）；知识库入口初始提交为 `98ecb82`。live action 仍为 0。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。

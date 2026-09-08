@@ -34,7 +34,7 @@
 ## 当前状态
 
 - 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现。
-- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 161/161、双视口 E2E 32/32、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
+- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 162/162、双视口 E2E 34/34、生产构建与 artifact 检查均通过。真实 Chromium 已覆盖跨标签状态传播、删除/PURGE 协调和 TRACE 日志绑定；外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
 - M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
@@ -44,7 +44,7 @@
 | 顺序 | ID | 模块/目标 | 状态 | 依赖 | 完成定义与 TRACE 证据 |
 | --- | --- | --- | --- | --- | --- |
 | 0 | `Q-M2-PILOT` | 一个窄真实只读源的 participant pilot | `PREPARED / NOT_RUN / EXTERNAL` | M1 必要证据、ConsentGrant、RetentionPolicy、pilot evidence runner、受控参与者 | 至少 12 名目标开发者、每人 2 次同类会话；记录 consent、preview/commit/revoke/retention、纠正耗时、退出/忽略、NetValue 与置信区间；报告 hash/binding/命令日志齐全，所有人工步骤写入 TRACE。 |
-| 0 | `Q-GATE-1` | Gate 1 外部人工/托管证据补齐 | `CONDITIONAL` | 自动化基线 | NVDA、人工视觉批准、托管 CI、跨标签协调等缺项有真实结果；每个 case 有 `PASS/FAIL/NOT_RUN` 和 artifact hash，禁止用 UI 成功文案替代。 |
+| 0 | `Q-GATE-1` | Gate 1 外部人工/托管证据补齐 | `CONDITIONAL` | 自动化基线 | 本地 Chromium 已覆盖跨标签状态传播与删除/PURGE 协调；仍需 NVDA、人工视觉批准、托管 CI 及独立进程覆盖；每个 case 有 `PASS/FAIL/NOT_RUN` 和 artifact hash，禁止用 UI 成功文案替代。 |
 | 1 | `Q-M3-LIVE-EVAL` | 真实 provider/live-model evaluation | `NOT_RUN` | M2 pilot 结果、provider approval、出站 consent | 真实任务仅使用最小脱敏输入；记录 protocol/version、request/result hash、timeout/cancel、人工评审和模型价值；provider DTO 不进入 Core。 |
 | 1 | `Q-GATE-3` | Gate 3a/3b 独立裁决 | `CONDITIONAL` | Q-M3-LIVE-EVAL、TRACE 导出可核验 | Runtime 与 Projection 分别提交 contract/fault/live evidence；任一失败只回滚自身，不影响 Core；证据包由 TRACE 与 artifact manifest 互相回链。 |
 | 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `PREPARED / NEED_MORE_EVIDENCE / EXTERNAL` | Gate 1–3 证据、真实价值需求 | 见 [M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md)；只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。当前 PRD 仍 Shadow-only。 |

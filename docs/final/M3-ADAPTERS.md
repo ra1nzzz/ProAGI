@@ -53,6 +53,6 @@ npx playwright test tests/e2e/m3-projection.spec.ts
 
 验证中发现既有 a11y 测试未等待数据库启动，已与集成测试统一就绪等待。首次 Chromium 桌面删除场景出现 runtime fault，失败 trace 保留于 `test-results/local-1788832116748-31796/`；补充错误码附件后两种视口各重复两次通过。另以确定性测试复现并修复 lease renewal 遇到正常 purge quiescence 被误判为致命故障，真正的 storage fault 仍保持阻断。Windows release-gates 为 14 PASS / 1 既有平台限定 SKIP；本轮不宣称完整 release gate PASS。
 
-最终代码验证：161/161 单测通过，M3b 生产入口与 M2 readonly consent/revoke/retention-shortening 路径锁定 Chromium 两个项目 32/32 通过；M2 精确文件评估 7/7，pilot evidence tooling 6/6。lint、TypeScript、production build 和 production artifact 检查通过。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
+最终代码验证：162/162 单测通过，M3b 生产入口与 M2 readonly consent/revoke/retention-shortening 路径锁定 Chromium 两个项目 34/34 通过；M2 精确文件评估 7/7，pilot evidence tooling 6/6。lint、TypeScript、production build 和 production artifact 检查通过。跨标签状态传播与删除/PURGE 协调由 `tests/e2e/app.spec.ts` 覆盖；独立浏览器进程、M2 participant pilot 与真实 live-model evaluation 仍未完成。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
 
 Gate 3a / 3b 各自保持 CONDITIONAL；后续是受控真实模型任务验收与 M2 participant pilot。Runtime 可独立 dispose，Projection 可独立 disable；不会因一个子门通过而替另一个放行。M4 真实动作仍未实现。

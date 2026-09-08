@@ -36,7 +36,7 @@ Three independent YT-Review passes inspected code quality, efficiency/concurrenc
 These are not hidden or converted to PASS:
 
 1. NVDA smoke, human visual approval, and hosted CI are `NOT_RUN`.
-2. Cross-tab privacy preview fencing is verified, but cross-tab state propagation and deletion/PURGE coordination are not complete.
+2. Local locked Chromium now verifies cross-tab state propagation and deletion/PURGE coordination, including peer release before audit and runtime TRACE evidence; hosted CI and separate-browser-process coverage remain `NOT_RUN`.
 3. Deletion page enumeration still uses whole-store materialization internally; it is acceptable for the tiny bundled M1 fixture but not a large-store production implementation.
 4. The frozen full `PortRequestContext + DomainResult` surface, complete closed lifecycle/artifact root registry, and every extended SPEC schema field remain broader than the runnable synthetic slice.
 5. The byte-worker protocol is contract-tested but the bundled one-fixture UI path remains synchronous and synthetic-only.
@@ -44,9 +44,9 @@ These are not hidden or converted to PASS:
 
 ## Verification conclusion
 
-- Required suites: 11 non-empty suites.
-- Vitest: 14 files, **57/57 passed**.
-- Playwright Chromium: **16/16 passed** across desktop and 320 projects.
+- Required suites: 12 non-empty suites.
+- Vitest: 24 files, **162/162 passed**.
+- Playwright Chromium: **34/34 passed** across desktop and 320 projects.
 - Typecheck, ESLint, CSP check, dependency audit, and production build: passed.
-- Gate 1: **CONDITIONAL**, never PASS, because required manual/hosted and broader cross-tab evidence is absent.
+- Gate 1: **CONDITIONAL**, never PASS, because NVDA, human visual approval, hosted CI and separate-browser-process evidence remain absent.
 - Final evidence run: `evidence/M1/2026-09-04T17-38-02-616Z/`.

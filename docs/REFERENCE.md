@@ -23,6 +23,7 @@
 | --- | --- | --- | --- |
 | 北极星目标拆解：感知→理解→记忆→陪伴→能力/行动→受约束自进化 | [ROADMAP.md](ROADMAP.md)、[PRD](PRD/desktop-agent-complete-prd-v1.1.md)、[deep-research-report.md](research/deep-research-report.md) | 原始桌面 Agent PRD 与本项目深度调研结论 | 用于排列 M1→M5 与 `F-*` 依赖；长期方向不等于当前能力，所有扩大权限的模块仍需独立证据和阶段 Gate。 |
 | 事件优先、低粒度活动记录 | `src/domain/`、M1/M2 schema | [ActivityWatch](https://activitywatch.net/)、[Buckets and events](https://docs.activitywatch.net/en/latest/buckets-and-events.html)、[Security](https://docs.activitywatch.net/en/latest/security.html) | 参考 bucket/event 与本地数据边界；不复制其采集范围，不因此开放全局监听。 |
+| 原始 NDJSON Worker 校验 | `src/workers/ndjsonProtocol.ts`、`src/workers/ndjson.worker.ts`、`src/workers/browserImport.ts`、`tests/worker/`、`tests/e2e/app.spec.ts` | [Web Workers API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API)、[TextDecoder](https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder) | 采用 transferable `ArrayBuffer`、fatal UTF-8、有限 ACK/backpressure、cancel/dispose 和应用侧独立 hash 重算；当前只接入 bundled synthetic 预览，用户文件 ImportSession 仍未接入，Worker 不可用时 fail closed。 |
 | Windows 窄只读感知 | M5 规划、未来 UIA adapter | [Microsoft UI Automation](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-overview) | 参考控件语义访问模型；必须 allowlist、只读、可暂停、可降级，当前尚未实现。 |
 | 许可、隐私和屏幕访问边界 | M2/M5 consent 与 future screenshot fallback | [Recall privacy controls](https://support.microsoft.com/en-us/windows/privacy/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15)、[Apple screen/audio controls](https://support.apple.com/guide/mac-help/control-access-screen-system-audio-recording-mchld6aa7d23/mac) | 参考显式授权、暂停和可控范围；不代表本产品已持续截图或拥有系统权限。 |
 | 任务/结果 evaluator | `docs/final/EVAL.md`、`tests/evaluator/` | [OSWorld paper](https://arxiv.org/abs/2404.07972)、[OSWorld](https://github.com/xlang-ai/OSWorld) | 参考执行后状态 evaluator、任务初始状态和可复现评估；当前仍是本地 fixture/Shadow，不是 OSWorld 集成。 |
@@ -43,8 +44,9 @@
 
 ## 来源快照与冲突裁决
 
-- 本次知识库维护的输入快照为 commit `ec5ad146ea4e49b2b85b68d6eb86cf6aa69106a9`、tree `cb73d86e5b02e3eabec1ea7fd6f89eaa746a4e27`；本次只更新 ROADMAP/COMPLETED/REFERENCE 的目标、队列、状态与回链，不改变实现或外部证据状态。
+- 知识库初始维护输入快照为 commit `ec5ad146ea4e49b2b85b68d6eb86cf6aa69106a9`、tree `cb73d86e5b02e3eabec1ea7fd6f89eaa746a4e27`；后续条目按已验证代码、测试和文档提交追加，不能把历史快照误读为当前实现。
 - 跨标签状态传播与删除/PURGE 的本地 Chromium 证据由测试提交 `a42511fd79a4a69583660101bcf2d737566e809c`、tree `0da5c1845ab8ad493d4d4f669c5a4aea411d987b` 提供；该提交只增加 E2E 断言，不扩大 hosted CI、独立进程或人工 Gate 结论。
+- 2026-09-09 的 Worker 接线由 `src/workers/browserImport.ts`、`src/workers/ndjson.worker.ts`、`src/application/browserInsightRuntime.ts` 与对应 Worker/E2E 断言提供；生产构建 identity 为 `7d9f334f449a47e499de65a422ee0e5091de5c3801adee2096c8cedb4c78c917`，bundled synthetic 路径已实测，用户文件通用 ImportSession 仍未完成。
 - 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示、retention shortening、M4 action-decision TRACE 入口和预注册 case 校验已提交于 commit `8a6eb08`（其 tree 为 `5753e347077131b968ad9f02f1eaaaa2bb816d64`）；知识库入口初始提交为 `98ecb82`。live action 仍为 0。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。

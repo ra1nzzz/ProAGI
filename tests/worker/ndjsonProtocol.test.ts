@@ -102,6 +102,7 @@ describe('raw byte NDJSON worker protocol', () => {
     const send = (data: NdjsonWorkerInput) => scope.onmessage?.({ data } as MessageEvent<NdjsonWorkerInput>);
     send({ type: 'INIT', streamId: 'boundary', header: { ...header, declaredEventCount: 0 }, maxChunkBytes: 262_144, maxUnacked: 2 });
     send({ type: 'CHUNK', streamId: 'boundary', chunkId: 'one', sequence: '0', bytes: new TextEncoder().encode('\n').buffer, byteLength: 1 });
+    expect(posted.at(-1)?.message).toMatchObject({ type: 'VALIDATED', streamId: 'boundary', chunkId: 'one', sequence: '0' });
     send({ type: 'CHUNK', streamId: 'boundary', chunkId: 'two', sequence: '1', bytes: new TextEncoder().encode('\n').buffer, byteLength: 1 });
     const returned = new TextEncoder().encode('retry-me').buffer;
     send({ type: 'CHUNK', streamId: 'boundary', chunkId: 'three', sequence: '2', bytes: returned, byteLength: returned.byteLength });

@@ -28,7 +28,7 @@ export function installNdjsonWorker(scope: WorkerMessageScope): () => void {
         if (result.status === 'backpressure') {
           scope.postMessage({ ...result, streamId: message.streamId, chunkId: message.chunkId, sequence: message.sequence, bytes: message.bytes }, [message.bytes]);
         } else {
-          scope.postMessage(result);
+          scope.postMessage(result.message);
         }
       } else if (message.type === 'ACK') {
         protocol.ack(message);
@@ -50,4 +50,8 @@ export function installNdjsonWorker(scope: WorkerMessageScope): () => void {
     protocol = undefined;
     scope.onmessage = null;
   };
+}
+
+if (typeof window === 'undefined' && typeof self !== 'undefined') {
+  installNdjsonWorker(self as unknown as WorkerMessageScope);
 }

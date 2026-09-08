@@ -93,7 +93,7 @@ evidence/<milestone>/<run-id>/
 - 截图只能作辅助；领域状态导出才是主要证据。M1c required visual case 必须有 screenshot hash 与 reviewer approval ID，optional hash 不足以完成 M1c。
 - artifact-policy 必须覆盖 screenshot、video、HAR、trace、reporter、console、source map 和 CI upload 的扫描、隔离、TTL 与销毁 receipt。
 - 失败日志、隐私 canary 命中和回滚记录不得从交付包删除；含 canary 的发布 artifact 必须隔离并销毁，保留无 payload 失败 receipt。
-- 实施后状态（2026-09-08）：本地锁定 Chromium 已执行双标签 privacyEpoch preview fence、状态传播、删除/PURGE 协调与 peer release-before-audit，并由 `tests/e2e/app.spec.ts` 检查 `runtime.correction` 与 `runtime.background` TRACE 记录；独立浏览器进程、真实 NVDA、人工 visual approval 与 hosted CI 仍为 `NOT_RUN`，因此 Gate 1 不得表述为 PASS。
+- 实施后状态（2026-09-09）：本地锁定 Chromium 已执行双标签 privacyEpoch preview fence、状态传播、删除/PURGE 协调与 peer release-before-audit，并由 `tests/e2e/app.spec.ts` 检查 `runtime.correction`、`runtime.background` 与 bundled `runtime.worker` TRACE 记录；独立浏览器进程、真实 NVDA、人工 visual approval 与 hosted CI 仍为 `NOT_RUN`，因此 Gate 1 不得表述为 PASS。
 
 ### 2.3 Evidence Pack 保留期
 

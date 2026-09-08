@@ -39,6 +39,7 @@ export const TRACE_EVENT_NAMES = Object.freeze([
   'runtime.recover',
   'runtime.close',
   'runtime.background',
+  'runtime.worker',
   'runtime.operation',
   'projection.rebuild',
   'projection.export',

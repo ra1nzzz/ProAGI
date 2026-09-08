@@ -1,5 +1,6 @@
 import { IndexedDbM1bAdapter } from '../adapters/indexedDbM1b';
 import { ReadonlyTestResultsAdapter } from '../adapters/readonlyTestResults';
+import { createNdjsonWorker } from '../workers/browserImport';
 import { BrowserInsightRuntime, type BrowserInsightRuntimeOptions } from './browserInsightRuntime';
 import { InsightLoopService } from './insightService';
 import type { InsightServicePort, ReadonlyObservationAdapter } from './ports';
@@ -27,5 +28,6 @@ export function createBrowserInsightRuntime(options: BrowserRuntimeCompositionOp
     adapterFactory: options.adapterFactory ?? createDefaultRuntimeStorage,
     serviceFactory: options.serviceFactory ?? createDefaultInsightService,
     readonlyAdapter: options.readonlyAdapter ?? new ReadonlyTestResultsAdapter(),
+    workerFactory: options.workerFactory ?? (import.meta.env.VITEST ? null : createNdjsonWorker),
   });
 }

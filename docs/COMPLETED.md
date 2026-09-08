@@ -27,6 +27,7 @@
 
 - IndexedDB canonical store、cursor/epoch/incarnation、Preview/Import guard、幂等 receipt、delete lineage、PURGE/recovery 及 clear 边界。
 - PRIVATE、Consent/Retention 相关工程约束、删除不可复活、跨标签旧 preview fencing；本地 Chromium 已验证跨标签状态传播、删除/PURGE 协调与 peer runtime 释放。
+- byte-level NDJSON Worker 契约（fatal UTF-8、双消息 ACK/backpressure、cancel/dispose 与边界限制）已接入 bundled synthetic 浏览器预览；Worker 只预验证，Application 独立重算/hash，Worker 不可用时 fail closed。用户文件通用 streaming/ImportSession 仍留在 ROADMAP。
 - 依据：[final/ARCH.md](final/ARCH.md)、[final/CHECKPOINT.md](final/CHECKPOINT.md)、`src/adapters/indexedDbM1b.ts`、集成/E2E 测试。
 
 ### `C-M1-PRESENTATION` — Web AppShell 与 Shadow UI
@@ -78,7 +79,7 @@
 ## 验证摘要
 
 - Fork pool 单测：162/162 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
-- Chromium 双视口 E2E：34/34 通过；包含 M2 consent/revoke/delete、授权边界展示、保留期缩短、跨标签状态传播与删除/PURGE 协调、M2/M4 人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `aa0c2394ff435d9e79bd57547fcac780b804135fb6d3a811812a544e7f13040e`。
+- Chromium 双视口 E2E：34/34 通过；包含 bundled module Worker 预验证与 `runtime.worker=OK` TRACE、M2 consent/revoke/delete、授权边界展示、保留期缩短、跨标签状态传播与删除/PURGE 协调、M2/M4 人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `7d9f334f449a47e499de65a422ee0e5091de5c3801adee2096c8cedb4c78c917`。
 - M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
 - Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

@@ -1,6 +1,6 @@
 # M3 Runtime 与 Markdown Projection
 
-2026-09-08：M3a/M3b 工程实现已完成。M2 participant pilot 与真实 live-model evaluation `NOT_RUN`；本次不改变 Gate 2，也不宣称 Gate 3 全面放行。
+2026-09-09：M3a/M3b 工程实现已完成。M2 participant pilot 与真实 live-model evaluation `NOT_RUN`；本次不改变 Gate 2，也不宣称 Gate 3 全面放行。
 
 ## M3a Runtime
 
@@ -30,6 +30,8 @@ npm run smoke:runtime -- --endpoint ws://127.0.0.1:4513
 ## M3b Projection
 
 `MarkdownProjectionAdapter` 实现 ProjectionPort，输出一个 Obsidian 可读的 `proagi-knowledge.md`。保留 claim 状态（inferred/user-confirmed）、revision、scope、confidence、证据及反证引用；转义 HTML、远程图片与 Obsidian embed 语法。只投影结构化 claim，不写回 canonical store。
+
+bundled synthetic 的生产浏览器入口已接入真实 module Worker：Worker 先按原始字节流做 NDJSON/fatal UTF-8/计数校验，Application 再独立解析并比对候选 hash，成功后写入 `runtime.worker=OK` TRACE。当前不宣称用户文件通用 streaming/ImportSession 已完成。
 
 - `rebuild()`：每次 adapter 冷启动先从 IndexedDB 真相源全量生成，不把自洽重算 hash 的缓存当作真相；实例只记住自己发布的 head hash。此后用 `loadChangesSince` 读取变更，正常纠正仅加载改变的 claim；缺口、删除、epoch/incarnation 变化、超出 delta 上限时全量重建。
 - 发布同事务复核 canonical cursor/epoch/incarnation、原 projection hash 和 sourceCursor，阻止旧结果以及同游标并发覆盖。projection payload 与 Markdown hash 均校验，手工编辑冲突不覆盖。

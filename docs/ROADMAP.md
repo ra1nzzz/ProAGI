@@ -2,7 +2,7 @@
 
 > 本文件是项目级路线图与当前状态入口。它只保留未完成事项；已完成模块移至 [COMPLETED.md](COMPLETED.md)。实现依据与外部参考见 [REFERENCE.md](REFERENCE.md)。
 >
-> 审计日期：2026-09-08。阶段放行仍以 [final/CHECKPOINT.md](final/CHECKPOINT.md) 为准，领域契约仍以 [final/SPEC.md](final/SPEC.md) 为准。
+> 审计日期：2026-09-09。阶段放行仍以 [final/CHECKPOINT.md](final/CHECKPOINT.md) 为准，领域契约仍以 [final/SPEC.md](final/SPEC.md) 为准。
 
 ## 北极星目标
 
@@ -33,11 +33,11 @@
 
 ## 当前状态
 
-- 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现。
+- 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现；M1b byte-level Worker 已接入 bundled synthetic 浏览器预览，Worker 只做原始 NDJSON 预验证，Application 独立重算并比对候选与 hash，Worker 不可用时 fail closed。
 - TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 162/162、双视口 E2E 34/34、生产构建与 artifact 检查均通过。真实 Chromium 已覆盖跨标签状态传播、删除/PURGE 协调和 TRACE 日志绑定；外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
-- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
+- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；用户文件的通用 NDJSON streaming/ImportSession 仍未接入当前 UI；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
 
 ## 当前/进行中队列（只列未完成）
 

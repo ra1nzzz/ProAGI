@@ -5,7 +5,8 @@ import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, Knowledg
 import { runInsightLoop } from '../domain/insightLoop';
 import type { ReadonlyObservationAdapter } from './ports';
 import { makeConsentGrant, makeConsentRevocation, makeRetentionPolicy, type ConsentGrant, type ConsentRevocation, type ReadonlyConsentSnapshot, type RetentionPolicy } from './m2Consent';
-import { developerDayFixtureJson } from '../fixtures/developerDay';
+import { developerDayFixture, developerDayFixtureJson } from '../fixtures/developerDay';
+import { validateBundledFixtureWithWorker } from '../workers/browserImport';
 import type { CorrectionResult } from './knowledge';
 import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTIME_SNAPSHOT_EVENT, type ControlPort, type CorrectionPort, type ExternalPurgeNotification, type InsightServicePort, type ObservationPort, type ObservationPreviewDTO, type PurgeCommittedNotification, type RuntimeErrorNotification, type RuntimeNotificationPort, type RuntimeSnapshotNotification } from './ports';
 import type { ImportCommit } from './insightService';
@@ -134,6 +135,7 @@ export interface BrowserInsightRuntimeOptions {
   readonly cacheClearTimeoutMs?: number;
   readonly testHooks?: BrowserRuntimeTestHooks;
   readonly trace?: TraceRecorder;
+  readonly workerFactory?: (() => Worker) | null;
 }
 
 export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, ControlPort {
@@ -148,6 +150,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private readonly scheduler: BrowserRuntimeScheduler;
   private readonly cacheStore: BrowserRuntimeCacheStore | null;
   private readonly trace: TraceRecorder;
+  private readonly workerFactory: (() => Worker) | null;
   private clientRenewal: ReturnType<typeof setInterval> | null = null;
   private clientRegistered = false;
   private operationGeneration = 0;
@@ -216,6 +219,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.clock = options.clock ?? Date.now;
     this.scheduler = options.scheduler ?? DEFAULT_RUNTIME_SCHEDULER;
     this.cacheStore = options.cacheStore === undefined ? defaultCacheStore() : options.cacheStore;
+    this.workerFactory = options.workerFactory ?? null;
     this.adapter = this.adapterFactory();
     this.trace = options.trace ?? new TraceRecorder({ appendTraceEvents: (events) => this.adapter.appendTraceEvents(events) }, this.clock);
     this.service = this.serviceFactory();
@@ -752,6 +756,17 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const meta = await this.adapter.getMeta();
     if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
     if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
+    if (this.workerFactory) {
+      const workerValidation = await validateBundledFixtureWithWorker(this.workerFactory);
+      const expectedCandidates = developerDayFixture.events.map((event, index) => ({ sequence: String(index), event: event as unknown as Record<string, unknown> }));
+      if (workerValidation.receipt.state !== 'validated'
+        || workerValidation.receipt.validatedEventCount !== expectedCandidates.length
+        || hashCanonical(workerValidation.candidates) !== hashCanonical(expectedCandidates)) throw new Error('ERR_WORKER_VALIDATION');
+      await this.trace.record({
+        eventName: 'runtime.worker', correlationId: crypto.randomUUID(), resultCode: 'OK',
+        counts: { events: workerValidation.receipt.validatedEventCount, bytes: workerValidation.receipt.rawChunkBytes },
+      }).catch(() => undefined);
+    }
     const candidate = this.serviceFactory();
     const preview = candidate.preview(developerDayFixtureJson, now);
     const receipt = await candidate.commit(preview.token, crypto.randomUUID(), now);

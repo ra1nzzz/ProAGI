@@ -102,6 +102,9 @@ test('runs bundled import, immutable correction, and Replay in the browser', asy
   expect(await readStore(page, 'business')).toEqual([]);
   await page.getByRole('button', { name: '确认导入' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('已持久提交 4 条测试事件');
+  expect(await readStore(page, 'audit')).toEqual(expect.arrayContaining([
+    expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.worker', resultCode: 'OK' }) }),
+  ]));
   await page.getByRole('button', { name: '接受 Insight' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('持久写入不可变 revision');
   await page.reload();

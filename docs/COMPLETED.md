@@ -27,15 +27,16 @@
 
 - IndexedDB canonical store、cursor/epoch/incarnation、Preview/Import guard、幂等 receipt、delete lineage、PURGE/recovery 及 clear 边界。
 - PRIVATE、Consent/Retention 相关工程约束、删除不可复活、跨标签旧 preview fencing；本地 Chromium 已验证跨标签状态传播、删除/PURGE 协调与 peer runtime 释放。
-- byte-level NDJSON Worker 契约（fatal UTF-8、双消息 ACK/backpressure、cancel/dispose 与边界限制）已接入 bundled synthetic 与用户主动选择的严格 `json-import` NDJSON v1 预览；Worker 只预验证，Application 独立重算/hash，Worker 不可用时 fail closed。
+- byte-level NDJSON Worker 契约（fatal UTF-8、双消息 ACK/backpressure、cancel/dispose 与边界限制）已接入 bundled synthetic 预览；Worker 只预验证，Application 独立重算/hash，Worker 不可用时 fail closed。
 - 依据：[final/ARCH.md](final/ARCH.md)、[final/CHECKPOINT.md](final/CHECKPOINT.md)、`src/adapters/indexedDbM1b.ts`、集成/E2E 测试。
 
-### `C-M1B-NDJSON-IMPORT` — 用户选择的 NDJSON ImportSession
+### `C-M2-NDJSON-IMPORT` — consent-bound 用户 NDJSON ImportSession
 
-- UI 仅接受用户主动选择的严格 NDJSON v1：Worker 读取原始字节并校验 header/event/footer、UTF-8、顺序、数量和 byte receipt；Application 独立校验输入身份、候选事件、materialized event hash 与边界。
+- UI 仅接受用户主动选择且明确勾选风险的严格 NDJSON v1；每次预览必须绑定活动 `ConsentGrant`、`RetentionPolicy`、来源 key 与 `ndjson-import@1.0.0`，撤权或策略变化会使操作失效。Worker 读取原始字节并校验 header/event/footer、UTF-8、顺序、数量和 byte receipt；Application 独立校验输入身份、候选事件、materialized event hash 与边界。
 - 预览阶段不写入 business canonical store；确认后按批次进入 `ImportSession` staging，校验 batch hash、cursor/epoch、ledger receipt 后原子发布；发布前的部分数据对 Sensemaking、Replay 与 Projection 不可见，并写入 `runtime.worker`/`runtime.import` TRACE。
 - 已验证：Worker 单测、应用集成测试、真实 Chromium 桌面与 320px E2E。范围仍是一次性本地文件导入；不等于桌面持续监听、后台自动同步、任意格式适配或真实参与者价值证据。
-- 依据：[final/SPEC.md](final/SPEC.md) §5.5/§13.3、`src/workers/`、`src/application/browserInsightRuntime.ts`、`tests/worker/browserImport.test.ts`、`tests/e2e/app.spec.ts`。
+- 撤回该 NDJSON consent 会按同一 lineage 清除事件与派生结果；无 consent、来源 key 不匹配或 retention 被改变时，预览 fail closed 且不消费为业务数据。
+- 依据：[final/SPEC.md](final/SPEC.md) §5.5/§13.3、[final/M2-READONLY-DATA-PACK.md](final/M2-READONLY-DATA-PACK.md)、`src/workers/`、`src/application/browserInsightRuntime.ts`、`tests/worker/browserImport.test.ts`、`tests/e2e/app.spec.ts`。
 
 ### `C-M1-PRESENTATION` — Web AppShell 与 Shadow UI
 
@@ -86,7 +87,7 @@
 ## 验证摘要
 
 - Fork pool 单测：163/163 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
-- Chromium 双视口 E2E：36/36 通过；包含 bundled 与用户选择 NDJSON 的 module Worker 预验证、ImportSession 原子发布和 `runtime.worker`/`runtime.import=OK` TRACE、M2 consent/revoke/delete、授权边界展示、保留期缩短、跨标签状态传播与删除/PURGE 协调、M2/M4 人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `021a9ac740c9e8e5111e5ee42e848a36f980afb544716d3c05e628033dbe2b1e`。
+- Chromium 双视口 E2E：36/36 通过；包含 bundled 与 consent-bound 用户 NDJSON 的 module Worker 预验证、ImportSession 原子发布和 `runtime.worker`/`runtime.import=OK` TRACE、M2 consent/revoke/delete、授权边界展示、保留期缩短、跨标签状态传播与删除/PURGE 协调、M2/M4 人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `4ac7b04bcfe32862d95b45c4dda8ec682d85cf7445a9398834f3ec683de4b911`。
 - M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
 - Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

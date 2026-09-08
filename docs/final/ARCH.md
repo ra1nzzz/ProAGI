@@ -55,7 +55,7 @@ C4Context
 ```mermaid
 flowchart LR
   U[用户] --> UI[React/Web input adapter]
-  F[Fixture/NDJSON bytes] --> STREAM[ImportStreamController]
+  F[Fixture/consent-bound NDJSON bytes] --> STREAM[ImportStreamController]
   UI --> IN[ObservationPort / CorrectionPort / ControlPort\ninbound application interfaces]
   STREAM --> IN
   IN --> APP[Application Use Cases\n唯一编排者与 canonical writer]
@@ -160,11 +160,11 @@ sequenceDiagram
   participant Eval as reference-evaluator
   participant Projection as ProjectionPort
 
-  User->>Input: 选择 synthetic fixture / NDJSON bytes
+  User->>Input: 选择 synthetic fixture / consent-bound NDJSON bytes
   Input->>Worker: transferable byte chunks
   Worker->>Worker: fatal UTF-8 decode + framing/schema/redaction
   Worker-->>App: validation receipt + canonical candidate bytes/hash
-  App->>App: 独立复核 bytes/hash/policy，创建 preview guard
+  App->>App: 独立复核 bytes/hash/consent/policy，创建 preview guard
   App-->>User: readonly preview + opaque token
   User->>App: ObservationPort.commit(token)
   App->>Store: guard consume + tagged mutations + ledger/receipt
@@ -410,7 +410,7 @@ tests/{contract,integration,invariants,e2e,visual,a11y}/
 ### M1：Web Insight Loop
 M1a memory core → M1b IndexedDB/delete → M1c Inbox/DailyReportSnapshot/Orb/a11y；M1 不实例化 RuntimePort，动作仅生成 ShadowPreviewDTO 并由正式 renderer 纯展示。
 ### M2：窄真实只读源
-接一个用户主动选择、短期保留的只读 adapter；量化噪声、隐私误报和用户净价值，不引入真实动作。
+接一个用户主动选择、短期保留且绑定 ConsentGrant 的只读 adapter；量化噪声、隐私误报和用户净价值，不引入真实动作。NDJSON 文件入口也必须走该 consent-bound 边界。
 ### M3：Runtime 与知识投影（两个独立子门）
 - **M3a Runtime**：隔离 Codex/ACP adapter，验证 typed handle、deadline/cancel、capability、协议故障；provider 对象和原始流不得进入 Core。
 - **M3b Projection**：独立验证 Markdown/Obsidian projection 的 sourceCursor CAS、重建、冲突和删除传播。

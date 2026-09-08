@@ -31,7 +31,7 @@ npm run smoke:runtime -- --endpoint ws://127.0.0.1:4513
 
 `MarkdownProjectionAdapter` 实现 ProjectionPort，输出一个 Obsidian 可读的 `proagi-knowledge.md`。保留 claim 状态（inferred/user-confirmed）、revision、scope、confidence、证据及反证引用；转义 HTML、远程图片与 Obsidian embed 语法。只投影结构化 claim，不写回 canonical store。
 
-bundled synthetic 与用户主动选择的严格 `json-import` NDJSON v1 生产浏览器入口已接入真实 module Worker：Worker 先按原始字节流做 NDJSON/fatal UTF-8/计数校验，Application 再独立解析并比对候选 hash，用户确认后按批次进入 ImportSession 并原子发布，成功后写入 `runtime.worker=OK` 与 `runtime.import=OK` TRACE。当前不宣称持续桌面监听、自动采集或任意格式 adapter 已完成。
+bundled synthetic 与绑定活动 consent 的用户主动选择严格 `json-import` NDJSON v1 生产浏览器入口已接入真实 module Worker：Worker 先按原始字节流做 NDJSON/fatal UTF-8/计数校验，Application 再独立解析并比对候选 hash，用户确认后按批次进入 ImportSession 并原子发布，成功后写入 `runtime.worker=OK` 与 `runtime.import=OK` TRACE。当前不宣称持续桌面监听、自动采集或任意格式 adapter 已完成。
 
 - `rebuild()`：每次 adapter 冷启动先从 IndexedDB 真相源全量生成，不把自洽重算 hash 的缓存当作真相；实例只记住自己发布的 head hash。此后用 `loadChangesSince` 读取变更，正常纠正仅加载改变的 claim；缺口、删除、epoch/incarnation 变化、超出 delta 上限时全量重建。
 - 发布同事务复核 canonical cursor/epoch/incarnation、原 projection hash 和 sourceCursor，阻止旧结果以及同游标并发覆盖。projection payload 与 Markdown hash 均校验，手工编辑冲突不覆盖。
@@ -55,6 +55,6 @@ npx playwright test tests/e2e/m3-projection.spec.ts
 
 验证中发现既有 a11y 测试未等待数据库启动，已与集成测试统一就绪等待。首次 Chromium 桌面删除场景出现 runtime fault，失败 trace 保留于 `test-results/local-1788832116748-31796/`；补充错误码附件后两种视口各重复两次通过。另以确定性测试复现并修复 lease renewal 遇到正常 purge quiescence 被误判为致命故障，真正的 storage fault 仍保持阻断。Windows release-gates 为 14 PASS / 1 既有平台限定 SKIP；本轮不宣称完整 release gate PASS。
 
-最终代码验证：163/163 单测通过，M3b 生产入口、M2 readonly consent/revoke/retention-shortening 与用户选择 NDJSON ImportSession 路径锁定 Chromium 两个项目 36/36 通过；M2 精确文件评估 7/7，pilot evidence tooling 6/6。lint、TypeScript、production build 和 production artifact 检查通过。跨标签状态传播与删除/PURGE 协调由 `tests/e2e/app.spec.ts` 覆盖；独立浏览器进程、M2 participant pilot 与真实 live-model evaluation 仍未完成。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
+最终代码验证：163/163 单测通过，M3b 生产入口、M2 readonly consent/revoke/retention-shortening 与 consent-bound 用户 NDJSON ImportSession 路径锁定 Chromium 两个项目 36/36 通过；M2 精确文件评估 7/7，pilot evidence tooling 6/6。lint、TypeScript、production build 和 production artifact 检查通过。跨标签状态传播与删除/PURGE 协调由 `tests/e2e/app.spec.ts` 覆盖；独立浏览器进程、M2 participant pilot 与真实 live-model evaluation 仍未完成。并行负载下旧删除压力用例曾触及原 20 秒限制；停止并行验证后在 13.8 秒通过，未修改测试限制。
 
 Gate 3a / 3b 各自保持 CONDITIONAL；后续是受控真实模型任务验收与 M2 participant pilot。Runtime 可独立 dispose，Projection 可独立 disable；不会因一个子门通过而替另一个放行。M4 真实动作仍未实现。

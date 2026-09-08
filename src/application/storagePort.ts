@@ -6,6 +6,7 @@ import type {
   CommitResult,
   Cursor,
   DeletionPlanRecord,
+  ImportSessionRecord,
   PreviewCommitGuardRecord,
   PurgeAckRecord,
   ReachabilityResult,
@@ -16,7 +17,6 @@ import type {
   StorageKey,
 } from './storageContracts';
 import type { Hash, JsonImportInputIdentity } from '../domain/types';
-import type { ImportSessionRecord } from '../adapters/m1bTypes';
 
 export interface RuntimeRootHooks {
   readonly freeze: () => void;

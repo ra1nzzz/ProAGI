@@ -71,15 +71,18 @@ describe('browser NDJSON import path', () => {
     });
     runtimes.push(runtime);
 
-    const preview = await runtime.previewNdjson(ndjsonStream());
-    expect(preview).toMatchObject({ source: 'json-import', acceptedCount: 1, inputIdentity: { kind: 'json-import' } });
+    const sourceItemKey = 'ndjson-source';
+    await expect(runtime.previewNdjson(ndjsonStream(), { sourceItemKey })).rejects.toMatchObject({ message: 'ERR_CONSENT_STALE' });
+    await runtime.grantReadonlyConsent({ sourceItemKey, adapterId: 'ndjson-import', adapterVersion: '1.0.0' });
+    const preview = await runtime.previewNdjson(ndjsonStream(), { sourceItemKey });
+    expect(preview).toMatchObject({ source: 'json-import', acceptedCount: 1, consentId: expect.any(String), inputIdentity: { kind: 'json-import' } });
     expect(await adapter.scanPublishedBusiness()).toEqual([]);
     expect((await adapter.getAll<{ recordType: string }>('system')).some((record) => record.recordType === 'import_session')).toBe(false);
 
     const committed = await runtime.commit(preview.token);
     expect(committed).toMatchObject({ source: 'json-import', acceptedCount: 1 });
     expect(await adapter.scanPublishedBusiness()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ recordType: 'behavior_event_v1', payload: expect.objectContaining({ source: expect.objectContaining({ kind: 'json-import' }) }) }),
+      expect.objectContaining({ recordType: 'behavior_event_v1', retentionClass: 'event', payload: expect.objectContaining({ source: expect.objectContaining({ kind: 'json-import', consentId: preview.consentId }) }) }),
     ]));
     expect(await adapter.getAll<{ recordType: string; state?: string }>('system')).toEqual(expect.arrayContaining([
       expect.objectContaining({ recordType: 'import_session', state: 'PUBLISHED' }),
@@ -89,5 +92,7 @@ describe('browser NDJSON import path', () => {
       expect.objectContaining({ payload: expect.objectContaining({ eventName: 'runtime.worker', resultCode: 'OK' }) }),
       expect.objectContaining({ payload: expect.objectContaining({ eventName: 'runtime.import', resultCode: 'OK' }) }),
     ]));
+    await runtime.revokeReadonlyConsent(preview.consentId);
+    expect(await adapter.scanPublishedBusiness()).toEqual([]);
   });
 });

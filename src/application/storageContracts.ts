@@ -1,5 +1,5 @@
 import { hashCanonical } from '../domain/canonical';
-import type { Hash } from '../domain/types';
+import type { Hash, JsonImportInputIdentity } from '../domain/types';
 
 export type Cursor = string;
 export type StorageKey = string;
@@ -113,6 +113,21 @@ export interface PreviewCommitGuardRecord {
   readonly allowedFieldsHash?: Hash;
   readonly batchHash?: Hash;
   readonly receiptId?: string;
+  readonly contentHash: Hash;
+}
+
+export interface ImportSessionRecord {
+  readonly recordId: string;
+  readonly recordType: 'import_session';
+  readonly writtenAt: string;
+  readonly streamId: string;
+  readonly inputIdentity?: JsonImportInputIdentity;
+  readonly state: 'RECEIVING' | 'VALIDATED' | 'COMMITTING' | 'PUBLISHED' | 'CANCELLED' | 'FAILED';
+  readonly baseCursor: Cursor;
+  readonly privacyEpoch: number;
+  readonly committedBatchHashes: readonly Hash[];
+  readonly committedEventCount: number;
+  readonly publishedCursor?: Cursor;
   readonly contentHash: Hash;
 }
 

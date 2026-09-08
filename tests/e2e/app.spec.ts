@@ -146,7 +146,9 @@ test('imports a user-selected NDJSON file through Worker and ImportSession', asy
     JSON.stringify({ lineType: 'footer', eventCount: candidates.length, orderedEventsHash: orderedEventsHash(candidates) }),
   ].join('\r\n');
   await page.locator('[data-testid="ndjson-file"]').setInputFiles({ name: 'user-events.ndjson', mimeType: 'application/x-ndjson', buffer: Buffer.from(ndjson) });
-  await page.getByRole('button', { name: '预览 NDJSON' }).click();
+  const consentDialog = page.getByRole('dialog');
+  await consentDialog.getByRole('checkbox').check();
+  await consentDialog.getByRole('button', { name: '授权并预览 NDJSON' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('本地 NDJSON 预览已准备');
   expect(await readStore(page, 'business')).toEqual([]);
   await page.getByRole('button', { name: '确认导入' }).click();

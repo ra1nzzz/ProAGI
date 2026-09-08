@@ -1,5 +1,7 @@
 import { CommitResponseLostError as ApplicationCommitResponseLostError } from '../application/storageContracts';
-import type { Hash, JsonImportInputIdentity } from '../domain/types';
+import type { Hash } from '../domain/types';
+
+export type { ImportSessionRecord } from '../application/storageContracts';
 
 export type Cursor = string;
 export type StoreName =
@@ -144,21 +146,6 @@ export interface PreviewCommitReceipt {
   idempotencyKey: string;
   cursor: Cursor;
   batchHash: Hash;
-  contentHash: Hash;
-}
-
-export interface ImportSessionRecord {
-  recordId: string;
-  recordType: 'import_session';
-  writtenAt: string;
-  streamId: string;
-  inputIdentity?: JsonImportInputIdentity;
-  state: 'RECEIVING' | 'VALIDATED' | 'COMMITTING' | 'PUBLISHED' | 'CANCELLED' | 'FAILED';
-  baseCursor: Cursor;
-  privacyEpoch: number;
-  committedBatchHashes: readonly Hash[];
-  committedEventCount: number;
-  publishedCursor?: Cursor;
   contentHash: Hash;
 }
 

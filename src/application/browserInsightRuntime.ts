@@ -22,6 +22,8 @@ const PURGE_CLIENT_LEASE_MS = 6_000;
 const CACHE_CLEAR_TIMEOUT_MS = 10_000;
 const PURGE_UI_TIMEOUT_MS = 2_000;
 const READONLY_PREVIEW_TTL_MS = 5 * 60_000;
+const NDJSON_ADAPTER_ID = 'ndjson-import';
+const NDJSON_ADAPTER_VERSION = '1.0.0';
 
 export interface BrowserRuntimeScheduler {
   readonly setTimeout: typeof setTimeout;
@@ -559,11 +561,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }, false, 'runtime.shorten-retention');
   }
 
-  async grantReadonlyConsent(input: { readonly sourceItemKey: string; readonly eventTtlDays?: number; readonly derivedTtlDays?: number }): Promise<ReadonlyConsentSnapshot> {
+  async grantReadonlyConsent(input: { readonly sourceItemKey: string; readonly eventTtlDays?: number; readonly derivedTtlDays?: number; readonly adapterId?: string; readonly adapterVersion?: string }): Promise<ReadonlyConsentSnapshot> {
     return this.withRuntimeOperation(async () => {
       await this.start();
       await this.enforcePurgeFence();
       if (!/^[\p{L}\p{N}._-]{1,80}$/u.test(input.sourceItemKey)) throw new Error('ERR_SOURCE_ID_INVALID');
+      const adapterId = input.adapterId ?? this.readonlyAdapter.id;
+      const adapterVersion = input.adapterVersion ?? this.readonlyAdapter.version;
+      if (!/^[A-Za-z0-9._:-]{1,128}$/.test(adapterId) || !/^[A-Za-z0-9._:-]{1,128}$/.test(adapterVersion)) throw new Error('ERR_CONSENT_SCOPE');
       const existing = await this.loadReadonlyConsent();
       if (existing && !existing.revoked) throw new Error('ERR_CONSENT_ALREADY_ACTIVE');
       const meta = await this.adapter.getMeta();
@@ -571,8 +576,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const now = readM2Clock(this.clock);
       const policy = makeRetentionPolicy(crypto.randomUUID(), input.eventTtlDays, input.derivedTtlDays);
       const grant = makeConsentGrant({
-        id: crypto.randomUUID(), sourceItemKey: input.sourceItemKey, adapterId: this.readonlyAdapter.id,
-        adapterVersion: this.readonlyAdapter.version, retentionPolicyId: policy.id, grantedAt: new Date(now).toISOString(),
+        id: crypto.randomUUID(), sourceItemKey: input.sourceItemKey, adapterId, adapterVersion,
+        retentionPolicyId: policy.id, grantedAt: new Date(now).toISOString(),
       });
       const policyRecord = toStoredRecord(`retention-policy:${policy.id}`, 'retention_policy_v1', policy);
       const grantRecord = toStoredRecord(`consent-grant:${grant.id}`, 'consent_grant_v1', grant);
@@ -639,10 +644,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }, false, 'runtime.preview-readonly');
   }
 
-  async previewNdjson(stream: ReadableStream<Uint8Array>): Promise<ObservationPreviewDTO> {
+  async previewNdjson(stream: ReadableStream<Uint8Array>, input?: { readonly sourceItemKey?: string }): Promise<ObservationPreviewDTO> {
     return this.withRuntimeOperation(async () => {
       await this.start();
       await this.enforcePurgeFence();
+      const consent = await this.loadReadonlyConsent();
+      if (!consent || consent.revoked) throw new Error('ERR_CONSENT_STALE');
+      if (consent.grant.source.adapterId !== NDJSON_ADAPTER_ID || consent.grant.source.adapterVersion !== NDJSON_ADAPTER_VERSION) throw new Error('ERR_CONSENT_SCOPE');
+      if (!input?.sourceItemKey || input.sourceItemKey !== consent.grant.source.sourceItemKey) throw new Error('ERR_CONSENT_SCOPE');
       if (!this.workerFactory) throw new Error('ERR_WORKER_UNAVAILABLE');
       if (this.imported || this.pendingPreview) throw new Error('ERR_PREVIEW_ALREADY_EXISTS');
       const generation = this.operationGeneration;
@@ -653,6 +662,11 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
       const latestMeta = await this.adapter.getMeta();
       if (latestMeta.privacyEpoch !== meta.privacyEpoch || latestMeta.observationMode !== 'ACTIVE' || latestMeta.recoveryMode !== 'NORMAL') throw new Error('ERR_PRIVACY_EPOCH_STALE');
+      const latestConsent = await this.loadReadonlyConsent();
+      if (!latestConsent || latestConsent.revoked || latestConsent.grant.id !== consent.grant.id
+        || latestConsent.grant.source.sourceItemKey !== consent.grant.source.sourceItemKey
+        || latestConsent.policy.eventTtlDays !== consent.policy.eventTtlDays
+        || latestConsent.policy.derivedTtlDays !== consent.policy.derivedTtlDays) throw new Error('ERR_CONSENT_STALE');
       const inputIdentity = parseJsonImportIdentity(validation.header.inputIdentity);
       if (inputIdentity.inputHash !== orderedEventsHash(validation.candidates)) throw new Error('ERR_NDJSON_INPUT_HASH');
       if (validation.rejected.length > 0) throw new Error('ERR_NDJSON_REJECTED');
@@ -664,11 +678,16 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         events: validation.candidates.map(({ event }) => event),
       }));
       if (parsed.rejected.length > 0 || parsed.accepted.length !== validation.candidates.length) throw new Error('ERR_APP_SCHEMA_INVALID');
-      const events = materializeJsonImportBehaviorEvents(parsed.accepted, inputIdentity);
+      const events = materializeJsonImportBehaviorEvents(parsed.accepted, inputIdentity, {
+        consentId: consent.grant.id, policyVersion: consent.grant.policyVersion, purpose: consent.grant.purpose,
+      });
       events.forEach(assertApplicationBehaviorEvent);
       const candidate = this.serviceFactory();
-      const commit = buildJsonImport(candidate, events, inputIdentity);
-      const records = recordsForCommit(commit, now);
+      const commit = buildJsonImport(candidate, events, inputIdentity, consent.grant.id);
+      const records = recordsForCommit(commit, now, {
+        consentId: consent.grant.id, retentionPolicyId: consent.grant.retentionPolicyId,
+        eventTtlDays: consent.policy.eventTtlDays, derivedTtlDays: consent.policy.derivedTtlDays,
+      });
       const token = crypto.randomUUID();
       const pending: NdjsonPendingPreview = {
         kind: 'ndjson', candidate, commit, token, createdAt: now, streamId: validation.receipt.streamId,
@@ -689,6 +708,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       return {
         token, acceptedCount: events.length, episodeCount: commit.output.episodes.length, insightCount: commit.output.claims.length,
         source: 'json-import', inputIdentity, inputHash: inputIdentity.inputHash, importBatchId: inputIdentity.importBatchId,
+        consentId: consent.grant.id,
         expiresAt: new Date(now + READONLY_PREVIEW_TTL_MS).toISOString(), rejected: [], diagnostics: [],
       };
     }, false, 'runtime.preview-ndjson');
@@ -1552,6 +1572,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
           source: 'readonly-test-results' as const, consentId: events[0].source.consentId, sourceItemKey: events[0].source.sourceItemKey,
         } : events[0]?.source.kind === 'json-import' ? {
           source: 'json-import' as const, importBatchId: events[0].source.importBatchId,
+          ...(events[0].source.consentId ? { consentId: events[0].source.consentId } : {}),
+          ...(events[0].source.sourceItemKey ? { sourceItemKey: events[0].source.sourceItemKey } : {}),
         } : {}),
       });
     }
@@ -1611,14 +1633,14 @@ function recordsForCommit(commit: ImportCommit, asOf: number, retention?: Retent
   } : {}));
 }
 
-function buildJsonImport(service: InsightServicePort, events: readonly BehaviorEvent[], identity: JsonImportInputIdentity): ImportCommit {
+function buildJsonImport(service: InsightServicePort, events: readonly BehaviorEvent[], identity: JsonImportInputIdentity, consentId?: string): ImportCommit {
   const knowledge = service.knowledgeSnapshot();
   service.restoreEvents(events);
   const output = runInsightLoop(events, { asOf: latestEventAt(events), timezone: 'UTC', knowledge });
   service.hydrateKnowledge({ ...knowledge, claims: [...knowledge.claims, ...output.claims.filter((claim) => !knowledge.claims.some((known) => known.id === claim.id))] });
   return Object.freeze({
     events, output, acceptedCount: events.length, rejectedCount: 0, source: 'json-import' as const,
-    importBatchId: identity.importBatchId,
+    importBatchId: identity.importBatchId, ...(consentId ? { consentId } : {}),
   });
 }
 
@@ -1712,8 +1734,9 @@ function traceCounts(value: unknown): TraceCounts | undefined {
 }
 
 function isReadonlyEventRecord(record: StoredRecord): boolean {
-  return record.recordType === 'behavior_event_v1' && Boolean(record.payload && typeof record.payload === 'object'
-    && 'source' in record.payload && (record.payload as { source?: { kind?: unknown } }).source?.kind === 'readonly-adapter');
+  if (record.recordType !== 'behavior_event_v1' || !record.payload || typeof record.payload !== 'object' || !('source' in record.payload)) return false;
+  const source = (record.payload as { source?: { kind?: unknown; consentId?: unknown } }).source;
+  return source?.kind === 'readonly-adapter' || (source?.kind === 'json-import' && typeof source.consentId === 'string');
 }
 
 function assertConsentRecord(record: StoredRecord): void {

@@ -71,7 +71,7 @@ export interface ObservationPreviewDTO {
 
 export interface ObservationPort {
   preview(): Promise<ObservationPreviewDTO>;
-  previewNdjson(stream: ReadableStream<Uint8Array>): Promise<ObservationPreviewDTO>;
+  previewNdjson(stream: ReadableStream<Uint8Array>, input?: { readonly sourceItemKey?: string }): Promise<ObservationPreviewDTO>;
   commit(token: string): Promise<ImportCommit>;
 }
 

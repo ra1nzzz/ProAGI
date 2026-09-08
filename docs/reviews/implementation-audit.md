@@ -39,7 +39,7 @@ These are not hidden or converted to PASS:
 2. Local locked Chromium now verifies cross-tab state propagation and deletion/PURGE coordination, including peer release before audit and runtime TRACE evidence; hosted CI and separate-browser-process coverage remain `NOT_RUN`.
 3. Deletion page enumeration still uses whole-store materialization internally; it is acceptable for the tiny bundled M1 fixture but not a large-store production implementation.
 4. The frozen full `PortRequestContext + DomainResult` surface, complete closed lifecycle/artifact root registry, and every extended SPEC schema field remain broader than the runnable synthetic slice.
-5. The byte-worker protocol is contract-tested and both bundled synthetic and user-selected strict `json-import` NDJSON paths perform real module-Worker prevalidation with independent Application hash recomputation; desktop continuous capture and arbitrary source adapters remain pending.
+5. The byte-worker protocol is contract-tested; bundled synthetic and consent-bound user-selected strict `json-import` NDJSON paths perform real module-Worker prevalidation with independent Application hash recomputation. Desktop continuous capture and arbitrary source adapters remain pending.
 6. The independent evaluator covers the M1 rule fixture, not the complete future provenance graph or real-user value.
 
 ## Verification conclusion

@@ -115,6 +115,7 @@ export function materializeBehaviorEvents(result: FixtureParseResult): readonly 
 export function materializeJsonImportBehaviorEvents(
   inputs: readonly FixtureEventInput[],
   identity: JsonImportInputIdentity,
+  authorization?: { readonly consentId: string; readonly policyVersion: string; readonly purpose: string },
 ): readonly BehaviorEvent[] {
   return inputs.map((input) => materializeBehaviorEvent(input, {
     kind: 'json-import',
@@ -122,6 +123,7 @@ export function materializeJsonImportBehaviorEvents(
     sourceItemKey: input.sourceItemKey,
     adapterId: 'ndjson-import',
     adapterVersion: '1.0.0',
+    ...(authorization ?? {}),
   }));
 }
 

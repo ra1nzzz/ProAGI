@@ -106,7 +106,7 @@ export interface Scope {
 }
 export type SourceRef =
   | { kind: "fixture"; fixtureId: string; manifestHash: Hash; adapterId: string; adapterVersion: string }
-  | { kind: "json-import"; importBatchId: UUID; sourceItemKey: string; adapterId: string; adapterVersion: string }
+  | { kind: "json-import"; importBatchId: UUID; sourceItemKey: string; adapterId: string; adapterVersion: string; consentId?: UUID; policyVersion?: string; purpose?: string }
   | { kind: "readonly-adapter"; sourceItemKey: string; adapterId: string; adapterVersion: string; consentId: UUID; policyVersion: string; purpose: string };
 export type InputIdentity =
   | { kind: "fixture"; fixtureId: string; manifestHash: Hash }
@@ -1169,7 +1169,7 @@ export declare const ERROR_POLICY: Readonly<Record<ErrorCode, ErrorPolicy>>;
 | `prohibited` | secret、键击/剪贴板正文、像素、未授权来源 | 拒绝；不得进入 store/log/cache/export |
 
 BehaviorEvent 顶层、subject、attributes 仅允许本 schema 字段。`projectKey/branchHash` 只允许用户别名或 `HMAC-SHA256(installKey, normalizedValue)`；禁止裸 SHA-256、路径、组织名、仓库 URL。细 redaction rule ID 不持久化，只存粗粒度 count；Audit TTL 内也不得写命中值。
-M1 policy 只启用 fixture/json-import；M2 readonly-adapter 必须引用 active ConsentGrant，preview 与 commit 两次校验 consent/purpose/fields/policy/retention，撤回即递增 privacyEpoch、拒绝新摄入并按 ConsentGrant 的清除策略运行 DeletionPlan。
+M1 policy 只启用 bundled/synthetic/test-prepared fixture；M2 用户主动选择的 NDJSON `json-import` 与 `readonly-adapter` 都必须引用 active ConsentGrant，preview 与 commit 两次校验 consent/source/purpose/fields/policy/retention，撤回即递增 privacyEpoch、拒绝新摄入并按 ConsentGrant 的清除策略运行 DeletionPlan。
 
 ### 9.2 写前 redaction 决策表
 
@@ -1754,7 +1754,7 @@ KnowledgePort `scanEntities` 的 page token MUST 绑定 snapshotCursor、recordT
 
 ### 13.3 NDJSON V1 与 Worker 背压
 
-大输入 MUST 使用 §5 `NdjsonLineV1`：第一条且仅一条 header，中间恰为 `declaredEventCount` 条 event，最后一条且仅一条 footer。event.sequence 必须从 `"0"` 连续递增并以 BigInt 比较；footer.eventCount 必须等于 header 声明与实际计数，orderedEventsHash 覆盖按 sequence 的原始规范化 event 行。footer 后有非空字节、缺行、重复 header/footer、计数/hash 不符均整流验证失败。
+大输入 MUST 使用 §5 `NdjsonLineV1`：第一条且仅一条 header，中间恰为 `declaredEventCount` 条 event，最后一条且仅一条 footer。event.sequence 必须从 `"0"` 连续递增并以 BigInt 比较；footer.eventCount 必须等于 header 声明与实际计数，orderedEventsHash 覆盖按 sequence 的原始规范化 event 行。footer 后有非空字节、缺行、重复 header/footer、计数/hash 不符均整流验证失败。用户主动选择的 NDJSON 属于 M2 窄只读源，必须先取得匹配来源 key、adapter/version、policy 的 ConsentGrant；无 consent 不得读取或进入 Application。
 
 主线程与 Worker 仅使用 `INIT/CHUNK/VALIDATED/ACK/CANCEL/COMPLETE` tagged messages：
 

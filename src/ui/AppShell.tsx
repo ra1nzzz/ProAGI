@@ -82,6 +82,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const [readonlyConsent, setReadonlyConsent] = useState<ReadonlyConsentSnapshot | null>(null);
   const [readonlyFile, setReadonlyFile] = useState<File | null>(null);
   const [ndjsonFile, setNdjsonFile] = useState<File | null>(null);
+  const [ndjsonSourceItemKey, setNdjsonSourceItemKey] = useState<string | null>(null);
+  const [consentTarget, setConsentTarget] = useState<'readonly' | 'ndjson' | null>(null);
   const [readonlyConsentOpen, setReadonlyConsentOpen] = useState(false);
   const [readonlyBusy, setReadonlyBusy] = useState(false);
   const [ndjsonBusy, setNdjsonBusy] = useState(false);
@@ -146,6 +148,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setPreviewBusy(false);
       setNdjsonBusy(false);
       setNdjsonFile(null);
+      setNdjsonSourceItemKey(null);
+      setConsentTarget(null);
       setDeletionBusy(false);
       setDeleteConfirmOpen(false);
       setDomainStatus(detail?.external === false
@@ -176,6 +180,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
         setPreviewBusy(false);
         setNdjsonBusy(false);
         setNdjsonFile(null);
+        setNdjsonSourceItemKey(null);
+        setConsentTarget(null);
         setDeletionBusy(false);
         setDeleteConfirmOpen(false);
         setOrbState('IDLE');
@@ -598,37 +604,62 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
 
   const chooseReadonlyFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
-      setReadonlyFile(file);
-    if (file) { setRiskAccepted(false); setReadonlyConsentOpen(true); }
+    setReadonlyFile(file);
+    setNdjsonFile(null);
+    setNdjsonSourceItemKey(null);
+    if (file) { setRiskAccepted(false); setConsentTarget('readonly'); setReadonlyConsentOpen(true); }
     event.target.value = '';
   };
 
   const chooseNdjsonFile = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setNdjsonFile(event.target.files?.[0] ?? null);
+    const file = event.target.files?.[0] ?? null;
+    setNdjsonFile(file);
+    setReadonlyFile(null);
+    if (file) {
+      setRiskAccepted(false);
+      setNdjsonSourceItemKey(`ndjson-${sha256(`${file.name}|${file.size}|${file.lastModified}`).slice(7, 23)}`);
+      setConsentTarget('ndjson');
+      setReadonlyConsentOpen(true);
+    }
     event.target.value = '';
   };
 
-  const previewNdjsonFile = async () => {
+  const authorizeNdjsonFile = async () => {
     const file = ndjsonFile;
-    const epoch = uiEpochRef.current;
-    if (!file || !runtimeRef.current) return;
+    const sourceItemKey = ndjsonSourceItemKey;
+    const epoch = uiEpochRef.current + 1;
+    uiEpochRef.current = epoch;
+    if (!file || !sourceItemKey || !runtimeRef.current) return;
     if (runtimeFaulted) { setDomainStatus('本地运行时需要先完成安全恢复；普通写入保持暂停。'); return; }
     if (privateMode) { setDomainStatus('隐私模式中未导入；请先恢复观察。'); return; }
+    if (!riskAccepted) { setDomainStatus('请先明确接受 local-first 剩余风险。'); return; }
     setNdjsonBusy(true);
     try {
-      const preview = await runtimeRef.current.previewNdjson(file.stream());
+      const runtime = runtimeRef.current;
+      const currentConsent = await runtime.getReadonlyConsent();
+      const consent = currentConsent && !currentConsent.revoked
+        ? currentConsent
+        : await runtime.grantReadonlyConsent({
+          sourceItemKey, eventTtlDays, derivedTtlDays, adapterId: 'ndjson-import', adapterVersion: '1.0.0',
+        });
+      if (consent.grant.source.adapterId !== 'ndjson-import' || consent.grant.source.adapterVersion !== '1.0.0' || consent.grant.source.sourceItemKey !== sourceItemKey) throw new Error('ERR_CONSENT_SCOPE');
+      const preview = await runtime.previewNdjson(file.stream(), { sourceItemKey });
       if (epoch !== uiEpochRef.current) return;
+      setReadonlyConsent(consent);
       setPreviewToken(preview.token);
       setNdjsonFile(null);
+      setNdjsonSourceItemKey(null);
+      setConsentTarget(null);
+      setReadonlyConsentOpen(false);
       setOrbState('SUGGESTION');
       setDomainStatus(`本地 NDJSON 预览已准备：${preview.acceptedCount} 条事件、${preview.episodeCount} 个 Episode、${preview.insightCount} 条 Insight；尚未提交。`);
       setAnnouncement('本地 NDJSON 已完成 Worker 与 Application 双重校验，请明确确认后提交。');
-    } catch {
+    } catch (error) {
       if (epoch !== uiEpochRef.current) return;
-      await syncRuntimeFault(epoch);
+      const faulted = await syncRuntimeFault(epoch);
       if (epoch !== uiEpochRef.current) return;
-      setOrbState('ERROR');
-      setDomainStatus('本地 NDJSON 未启用（输入或 Worker 校验失败）；canonical store 未显示成功。');
+      setOrbState(faulted ? 'ERROR' : 'IDLE');
+      setDomainStatus(`本地 NDJSON 未启用（${safeErrorCode(error)}）；canonical store 未显示成功。`);
     } finally {
       if (epoch === uiEpochRef.current) setNdjsonBusy(false);
     }
@@ -649,6 +680,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setReadonlyConsent(consent);
       setPreviewToken(preview.token);
       setReadonlyConsentOpen(false);
+      setConsentTarget(null);
       setOrbState('SUGGESTION');
       setDomainStatus(`真实只读来源预览已准备：${preview.acceptedCount} 条事件、${preview.episodeCount} 个 Episode、${preview.insightCount} 条 Insight；尚未提交。`);
       setAnnouncement('真实只读来源已授权并完成导入前预览。');
@@ -670,6 +702,9 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setReadonlyFile(null);
       setImported(null);
       setPreviewToken(null);
+      setNdjsonFile(null);
+      setNdjsonSourceItemKey(null);
+      setConsentTarget(null);
       setDomainStatus('真实来源授权已撤回，相关事件与派生 lineage 已按删除协议清除。');
       setAnnouncement('真实来源授权已撤回。');
     } catch (error) {
@@ -914,7 +949,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               选择本地 NDJSON
               <input ref={ndjsonFileRef} data-testid="ndjson-file" type="file" accept="application/x-ndjson,.ndjson" onChange={chooseNdjsonFile} hidden />
             </label>
-            {ndjsonFile ? <button type="button" className="button button--quiet" onClick={() => void previewNdjsonFile()} disabled={runtimeFaulted || privateMode || ndjsonBusy || Boolean(imported) || Boolean(previewToken)}>{ndjsonBusy ? '校验中…' : '预览 NDJSON'}</button> : null}
+            {ndjsonFile ? <button type="button" className="button button--quiet" onClick={() => void authorizeNdjsonFile()} disabled={runtimeFaulted || privateMode || ndjsonBusy || readonlyConsentOpen || Boolean(imported) || Boolean(previewToken)}>{ndjsonBusy ? '校验中…' : '授权并预览 NDJSON'}</button> : null}
             {readonlyConsent?.grant && !readonlyConsent.revoked ? <>
               <button type="button" className="button button--quiet" onClick={() => void revokeReadonly()} disabled={readonlyBusy}>撤回真实来源授权</button>
               <button type="button" className="button button--quiet" onClick={() => void expireReadonly()} disabled={readonlyBusy}>清理到期数据</button>
@@ -926,7 +961,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
           <details className="consent-details">
             <summary>查看当前真实只读授权边界</summary>
             <dl className="consent-details__grid">
-              <div><dt>来源</dt><dd>readonly-test-results（用户主动选择）</dd></div>
+              <div><dt>来源</dt><dd>{readonlyConsent.grant.source.adapterId}（用户主动选择）</dd></div>
               <div><dt>数据分类</dt><dd>local-sensitive</dd></div>
               <div><dt>用途</dt><dd>{readonlyConsent.grant.purpose}</dd></div>
               <div><dt>保留策略</dt><dd>事件 {readonlyConsent.policy.eventTtlDays} 天 · 派生 {readonlyConsent.policy.derivedTtlDays} 天</dd></div>
@@ -945,12 +980,12 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
           </details>
         ) : null}
 
-        {readonlyConsentOpen && readonlyFile ? (
+        {readonlyConsentOpen && (readonlyFile || ndjsonFile) ? (
           <section className="stale-banner" role="dialog" aria-modal="true" aria-labelledby="readonly-consent-title">
             <div>
               <p className="eyebrow">M2 · 明确授权</p>
-              <h2 id="readonly-consent-title">允许读取这份真实测试结果？</h2>
-              <p>仅保留白名单字段：事件时间、类型、测试结果、耗时和用户提供的来源别名；不会联网、执行动作或保存原始错误正文。</p>
+              <h2 id="readonly-consent-title">{consentTarget === 'ndjson' ? '允许读取这份 NDJSON 测试来源？' : '允许读取这份真实测试结果？'}</h2>
+              <p>仅保留白名单字段：事件时间、类型、测试结果、耗时和用户提供的来源别名；不会联网、执行动作或保存原始错误正文。NDJSON 仅按严格 schema 流式校验，不会把原始文件交给应用层长期保存。</p>
               <p>默认保留：事件 7 天，派生 Insight 30 天。撤回授权会递增 privacy epoch，并删除该来源的事件与派生 lineage。</p>
               <div className="button-row" aria-label="保留期设置">
                 <label>事件保留 <select value={eventTtlDays} onChange={(event) => setEventTtlDays(Number(event.target.value))}><option value={1}>1 天</option><option value={3}>3 天</option><option value={7}>7 天</option></select></label>
@@ -959,8 +994,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               <label className="checkbox-row"><input type="checkbox" checked={riskAccepted} onChange={(event) => setRiskAccepted(event.target.checked)} /> 我已知悉 local-first 不能防同机用户、恶意扩展、profile 同步/备份或磁盘取证。</label>
             </div>
             <div className="segmented-control">
-              <button type="button" className="button button--quiet" onClick={() => { setReadonlyConsentOpen(false); setReadonlyFile(null); }}>取消</button>
-              <button type="button" className="button button--primary" onClick={() => void authorizeReadonlyFile()} disabled={!riskAccepted || readonlyBusy}>{readonlyBusy ? '分析中…' : '授权并预览'}</button>
+              <button type="button" className="button button--quiet" onClick={() => { setReadonlyConsentOpen(false); setConsentTarget(null); setReadonlyFile(null); setNdjsonFile(null); setNdjsonSourceItemKey(null); }}>取消</button>
+              <button type="button" className="button button--primary" onClick={() => void (consentTarget === 'ndjson' ? authorizeNdjsonFile() : authorizeReadonlyFile())} disabled={!riskAccepted || readonlyBusy || ndjsonBusy}>{readonlyBusy || ndjsonBusy ? '分析中…' : consentTarget === 'ndjson' ? '授权并预览 NDJSON' : '授权并预览'}</button>
             </div>
           </section>
         ) : null}

@@ -146,6 +146,14 @@ Artifact MUST 按 `TestArtifactSinkRegistryV1` 穷尽登记 `json-report | junit
 
 人工核验完成后，操作者 MUST 先准备 TRACE 预览，核对事件数量、classification、无原始输入/路径/动态字段，再明确确认不可逆本地导出。导出的 `contentHash`、artifact hash、命令退出码、环境和 `manual.check` correlationId 必须可互相追溯；后续诊断事件只属于下一次快照，不得修改已确认包。TRACE 是证据索引和脱敏诊断，不替代 NVDA、视觉批准、participant pilot 或真实 live-model 操作本身。
 
+M2 participant pilot 的结构化记录 MUST 通过 `scripts/pilot-evidence.mjs` 生成，不得直接编辑统计结果。输入只允许 participant/session token、consent 生命周期布尔值、retention 状态、review outcome、纠正秒数和 NetValue 秒数；未知字段、自由文本、姓名、路径、原始任务内容和敏感值必须拒绝。工具输出 `pilot-report.json`、`pilot-trace-binding.json` 和 `pilot-evidence.log`，报告按 participant mean 计算 NetValue，并提供确定性 percentile bootstrap 95% 区间。命令为：
+
+```bash
+npm run pilot:evidence -- --input <redacted-pilot.json> --output <fresh-evidence-dir> --generated-at <ISO-8601>
+```
+
+工具只输出 `RECORDED/NOT_RUN` 与 `CONDITIONAL`，不会自动产生 `PASS`；操作者必须审阅报告后，将 binding 中的 `M2.pilot`、step、reviewer token、结果和 artifact SHA-256 通过 Application `recordManualCheck` 写入 TRACE。缺少 12 名参与者且每人至少 2 次合格会话、生命周期记录不完整或 NetValue 不为正时，报告只能保持未放行状态；没有真实输入时不得生成示例结果冒充 pilot。
+
 Fixture reset MUST 清空前一个用例的 IndexedDB、Cache Storage、内存/Worker/search/projection cache、import staging、索引、定时器、BroadcastChannel 测试连接、announcement queue 与 UI 状态，并重建已知初始 `StoreMeta.cursor/privacyEpoch/recoveryMode/observationMode`。涉及删除的 fixture MUST 在输入 artifact 声明 journal 初态，预期终态只写入 Gold；涉及 consent/retention/PRIVATE 的 fixture MUST 声明 scenario。禁止测试代码从被测输出反推期望。
 
 ---

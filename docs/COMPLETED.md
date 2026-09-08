@@ -36,6 +36,12 @@
 - 真实 participant pilot、NetValue 与 Gate 2 仍未完成，保留在 ROADMAP 的 `Q-M2-PILOT`。
 - 依据：[final/M2-READONLY-DATA-PACK.md](final/M2-READONLY-DATA-PACK.md)、[final/EVAL.md](final/EVAL.md)、M2 集成测试。
 
+### `C-M2-PILOT-EVIDENCE-TOOLING` — participant pilot 脱敏取证工具
+
+- `scripts/pilot-evidence.mjs` 严格校验 participant/session token、consent 生命周期、retention、纠正结果与 NetValue；拒绝未知字段、自由文本和原始工作内容。
+- 生成 participant-level 汇总、确定性 bootstrap 95% 区间、报告 content hash、artifact hash、TRACE binding 和 payload-free 运行日志；默认不产生 `PASS`，真实 pilot 仍在 ROADMAP。
+- 依据与实现：[final/EVAL.md](final/EVAL.md)、`scripts/pilot-evidence.mjs`、`scripts/tests/pilot-evidence.test.mjs`。
+
 ### `C-M3A-RUNTIME` — typed Runtime/fake/Codex adapter 工程
 
 - typed request/handle/result、capability、deadline/cancel、idempotency、protocol mismatch 与 provider DTO 隔离。
@@ -65,5 +71,6 @@
 
 - Fork pool 单测：160/160 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
 - Chromium 双视口 E2E：30/30 通过；包含人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `303478ed0a3b1fc961737642b51406e3e24dc536ffb4c3ac478cbdd58e0c0d19`。
-- Release gates：8 项通过，1 项显式 `SKIP`（超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
+- M2 pilot evidence tooling：5/5 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding 和失败日志。
+- Release gates：13 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

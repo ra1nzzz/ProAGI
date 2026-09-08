@@ -20,6 +20,7 @@
     "test:fixtures": "node scripts/run-m2-suite.mjs fixtures",
     "test:privacy": "node scripts/run-m2-suite.mjs privacy",
     "eval": "node scripts/eval.mjs",
+    "pilot:evidence": "node scripts/pilot-evidence.mjs",
     "test:runtime-contract": "vitest run tests/runtime/contract.test.ts tests/runtime/codex.test.ts",
     "test:runtime-faults": "vitest run tests/runtime/faults.test.ts",
     "smoke:runtime": "node scripts/smoke-runtime.mjs",

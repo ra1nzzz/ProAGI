@@ -196,12 +196,12 @@ npm run verify:release
 5. 实现独立 readonly input adapter，调用 application 的 inbound ObservationPort；领域 schema 不随来源变化。
 6. 处理 drop、duplicate、reorder、clock skew、schema drift、locale/timezone，并按四级分类和 redaction 二次校验。
 7. 建立导入前预览、安全拒绝原因和字段级 provenance。
-8. 运行小规模 Shadow pilot，不开启动作；export 只能由用户另行明确触发。
+8. 运行小规模 Shadow pilot，不开启动作；先用 `scripts/pilot-evidence.mjs` 生成严格脱敏的报告、artifact hash 和运行日志，再由操作者审阅并通过 TRACE `manual.check` 记录；export 只能由用户另行明确触发。真实参与者结果不得由自动化生成或替代。
 
 ### 4.3 依赖与产物
 
 - 依赖 M1 全部门通过。
-- 产物：单一只读 adapter、数据字典、consent 流程、保留策略、噪声测试与 pilot 数据包。
+- 产物：单一只读 adapter、数据字典、consent 流程、保留策略、噪声测试、严格脱敏的 pilot evidence report/log/binding 与真实 pilot 数据包。
 
 ### 4.4 验证命令
 

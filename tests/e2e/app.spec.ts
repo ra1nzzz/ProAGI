@@ -119,6 +119,47 @@ test('runs bundled import, immutable correction, and Replay in the browser', asy
   await expect(page.locator('.domain-loop__status')).toContainText('Replay 完成');
 });
 
+test('runs the consent-bound readonly flow and records its pilot evidence state', async ({ page }) => {
+  await page.goto('/');
+  const capturedAt = new Date().toISOString();
+  const occurredAt = new Date(Date.now() - 60_000).toISOString();
+  const readonlyInput = JSON.stringify({
+    schemaVersion: '1.0.0', capturedAt, timezone: 'UTC', locale: 'en-US', projectAlias: 'proagi',
+    events: [
+      { sourceItemKey: 'change', occurredAt, kind: 'file.changed', subject: { appId: 'vscode', projectKey: 'proagi' }, attributes: { appId: 'vscode', projectKey: 'proagi', fileExt: 'ts', operation: 'modify' } },
+      { sourceItemKey: 'test', occurredAt, kind: 'test.completed', subject: { appId: 'terminal', projectKey: 'proagi' }, attributes: { appId: 'terminal', projectKey: 'proagi', commandClass: 'test', testOutcome: 'passed', durationMs: 80 } },
+    ],
+  });
+  await page.locator('[data-testid="readonly-file"]').setInputFiles({ name: 'readonly-test-results.json', mimeType: 'application/json', buffer: Buffer.from(readonlyInput) });
+  const consent = page.getByRole('dialog', { name: '允许读取这份真实测试结果？' });
+  await expect(consent).toBeVisible();
+  await consent.getByRole('checkbox').check();
+  await consent.getByRole('button', { name: '授权并预览' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('真实只读来源预览已准备');
+  expect(await readStore(page, 'business')).toEqual([]);
+
+  await page.getByRole('button', { name: '确认导入' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('真实只读来源已持久提交 2 条事件');
+  const committed = await readStore(page, 'business') as Array<Record<string, unknown>>;
+  expect(committed.filter((record) => record.recordType === 'behavior_event_v1')).toHaveLength(2);
+  expect(committed.every((record) => typeof record.consentId === 'string' && typeof record.retentionPolicyId === 'string')).toBe(true);
+
+  await page.getByRole('button', { name: '撤回真实来源授权' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('真实来源授权已撤回');
+  expect(await readStore(page, 'business')).toEqual([]);
+  expect(await readStore(page, 'system')).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'consent_revocation_v1' })]));
+
+  await page.getByRole('button', { name: '查看证据详情' }).click();
+  const traceDialog = page.getByRole('dialog', { name: '证据与版本详情' });
+  await traceDialog.getByLabel('用例').selectOption('M2.pilot');
+  await traceDialog.getByLabel('步骤 token').fill('readonly-consent-revoke');
+  await traceDialog.getByLabel('审核人 token').fill('e2e-reviewer');
+  await traceDialog.getByLabel('结果').selectOption('NOT_RUN');
+  await traceDialog.getByRole('button', { name: '写入 TRACE' }).click();
+  const trace = (await readStore(page, 'audit')) as Array<Record<string, unknown>>;
+  expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'manual.check', manualCheck: expect.objectContaining({ caseId: 'M2.pilot', result: 'NOT_RUN' }) }) })]));
+});
+
 test('exports an explicitly confirmed redacted TRACE package', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '查看证据详情' }).click();

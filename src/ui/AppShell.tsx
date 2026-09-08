@@ -152,7 +152,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     const handleRuntimeSnapshot = (event: Event) => {
       const detail = (event as CustomEvent<RuntimeSnapshotNotification>).detail;
       if (!detail) return;
-      if (detail.purge || detail.purgeVerified) uiEpochRef.current += 1;
+      if ((detail.purge && !detail.purgeVerified) || (detail.purgeVerified && detail.externalPurge)) uiEpochRef.current += 1;
       if (detail.imported !== undefined) {
         setImported(detail.imported);
         setReplaySnapshot(null);

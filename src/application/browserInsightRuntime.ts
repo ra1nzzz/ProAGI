@@ -596,7 +596,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       this.readonlyConsent = { ...snapshot, revoked: true, revocation };
       await this.deleteReadonlyConsentLineage(id);
       await this.hydrate();
-      this.notifyRuntimeSnapshot(true);
+      const verifiedMeta = await this.adapter.getMeta();
+      this.notifyRuntimeSnapshot(false, verifiedMeta.observationMode, true, false);
     }, false, 'runtime.revoke-consent');
   }
 

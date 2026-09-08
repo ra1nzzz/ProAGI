@@ -59,7 +59,7 @@
 
 ### `C-TRACE-EVIDENCE` — 本地 TRACE 与人工核验闭环
 
-- Runtime、Projection、隐私状态和手动核验均写入本地脱敏 `trace_event_v1`；人工核验使用固定 case、step/reviewer token、`PASS/FAIL/NOT_RUN` 和可选 artifact SHA-256。
+- Runtime、Projection、隐私状态和手动核验均写入本地脱敏 `trace_event_v1`；人工核验使用固定 case、step/reviewer token、`PASS/FAIL/NOT_RUN` 和可选 artifact SHA-256，入口覆盖 M1c、M2 pilot、M3 live-model、M4 action decision 与 M5 native smoke。
 - TRACE 采用严格字段白名单，拒绝原始输入、路径、动态敏感字段和自由文本；持久化边界为 30 天、最多 2048 条、最多 1 MiB，内存队列最多 512 条，sink 失败不影响 Core。
 - 导出必须先生成预览、用户明确确认后导出；通过不可变预览快照避免异步诊断造成 hash 竞态，并在 privacy/revoke/clear/close/manual check 或外部状态变化时失效。
 - 依据与实现：[final/ARCH.md](final/ARCH.md)、[final/EVAL.md](final/EVAL.md)、`src/application/trace.ts`、`src/application/browserInsightRuntime.ts`、`tests/trace/`、`tests/e2e/app.spec.ts`。
@@ -72,7 +72,7 @@
 ## 验证摘要
 
 - Fork pool 单测：161/161 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
-- Chromium 双视口 E2E：32/32 通过；包含 M2 consent/revoke/delete、授权边界展示、保留期缩短、人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `2d2540e1237ca11417aefe0c8e0ad44cf4551e8954f1e9f804255d6256bcc043`。
+- Chromium 双视口 E2E：32/32 通过；包含 M2 consent/revoke/delete、授权边界展示、保留期缩短、M2/M4 人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `159978c3a89a79dd95798df8931bf61539e0b65be03e787790a40a22ad8a3e1c`。
 - M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
 - Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

@@ -224,6 +224,8 @@ evidence/<milestone>/<run-id>/
 
 ## 7. Gate 3：M3 两个独立子门
 
+2026-09-08 工程进度：typed Runtime/fake/Codex adapter 与 Markdown/Obsidian projection 已落地，见 [M3-ADAPTERS.md](M3-ADAPTERS.md)。3a/3b 保持 `CONDITIONAL`：真实 provider smoke 目前只验证初始化握手，M2 participant pilot 与生产交互入口仍待完成。各自自动化报告不得被解读为阶段全面放行。
+
 ### 7.1 Gate 3a — Runtime
 
 - typed RuntimeRequest/Handle/Result、deadline/cancel、capability 和 idempotency contract 全过。

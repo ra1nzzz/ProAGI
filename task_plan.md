@@ -29,7 +29,13 @@
    - durable purge watermark 与 frozen-tab visibility catch-up；补充 Playwright/response-loss/TOCTOU regression
    - 三维 YT review 与 PR/nightly gates 已完成；release binding 保留真实 semver tag CI 条件；本阶段以最终原子提交/push 交付
 
-## 关键约束
+## 后续里程碑（2026-09-08）
+
+- M2 工程实现已提交 `ce5fcf2`；真实 participant pilot 仍为 NOT_RUN，Gate 2 CONDITIONAL。
+- 用户明确要求推进 M3；本轮实现 Runtime/fake/Codex adapter、Markdown 投影增量/CAS/删除传播、独立评估入口与真实协议 smoke。
+- M3 子门状态及后续验收以 `docs/final/M3-ADAPTERS.md` 为当前记录；不以工程完成替代 Gate 2/3 的真实试点证据。
+
+## 关键约束（延续）
 - deep-research 任意时刻并行 subagent ≤ 7；子代理不得再派子代理。
 - 外部调研内容只进入 `findings.md` 或最终研究报告，不写入本计划。
 - 评审最多 5 轮，评分仅供比较，不作为硬门禁。

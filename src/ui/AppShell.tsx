@@ -7,6 +7,7 @@ import type { ImportCommit } from '../application/insightService';
 import type { CorrectionAction } from '../domain/types';
 import type { ReplaySnapshotV1 } from '../domain/replay';
 import type { ReadonlyConsentSnapshot } from '../application/m2Consent';
+import type { MarkdownProjection } from '../application/projectionPort';
 import { sha256 } from '../domain/canonical';
 import { ORB_STATES, ORB_STATE_LABELS, type ContentMode, type OrbState } from './demoViewModel';
 import { buildInsightPresentation } from './presentation';
@@ -19,6 +20,7 @@ interface ProagiE2eHarness {
   runtime?: {
     importWithResponseLoss: () => Promise<void>;
     deleteWithResponseLoss?: () => Promise<void>;
+    projectionRebuild?: (forceFull?: boolean) => Promise<MarkdownProjection>;
   };
 }
 
@@ -149,6 +151,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   useEffect(() => {
     let active = true;
     let runtime: BrowserInsightRuntime;
+    let closeProjection: () => void = () => undefined;
     const notificationPort = createWindowRuntimeNotificationPort();
     if (import.meta.env.VITE_PROAGI_E2E_HOOKS === '1') {
       const harness = (window as Window & { __proagiE2e?: ProagiE2eHarness }).__proagiE2e;
@@ -159,7 +162,18 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       };
       runtime = createBrowserInsightRuntime({ testHooks, notificationPort });
       if (harness) {
+        let projection: Promise<import('../adapters/markdownProjection').MarkdownProjectionAdapter> | undefined;
         harness.runtime = {
+          projectionRebuild: async (forceFull = false) => {
+            projection ??= Promise.all([import('../adapters/indexedDbM1b'), import('../adapters/markdownProjection')]).then(([{ IndexedDbM1bAdapter }, { MarkdownProjectionAdapter }]) => {
+              if (!active) throw new Error('ERR_PROJECTION_DISABLED');
+              const store = new IndexedDbM1bAdapter('proagi-insight-loop-m1-v1');
+              const adapter = new MarkdownProjectionAdapter(store);
+              closeProjection = () => { adapter.disable(); store.dispose(); };
+              return adapter;
+            });
+            return (await projection).rebuild({ forceFull });
+          },
           importWithResponseLoss: async () => {
             await runtime.preview();
             await runtime.commitBundled({ simulateResponseLoss: true });
@@ -211,6 +225,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     return () => {
       active = false;
       window.clearTimeout(consentLoadTimer);
+      closeProjection();
       uiEpochRef.current += 1;
       if (runtimeRef.current === runtime) runtimeRef.current = null;
        void runtime.close();

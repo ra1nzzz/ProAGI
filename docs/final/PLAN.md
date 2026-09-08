@@ -8,7 +8,7 @@
 - canonical roadmap 顺序固定：**M1 npm + TypeScript/Web Insight Loop → M2 窄真实只读源 → M3 Runtime Adapter 与知识投影 → M4 真实动作独立 PRD 检查点 → M5 Tauri 壳与窄 Windows UIA**。M4 只做立项/停止裁决，不实现 live action。
 - 任一里程碑不得借用后续能力伪装完成当前阶段。
 - 评价口径统一引用 `docs/final/EVAL.md`；阶段放行统一引用 `docs/final/CHECKPOINT.md`。
-- **当前状态：M1 本地实现、自动化验证与用户人工验收完成 / Gate 1 CONDITIONAL**。M1 浏览器研究原型已由用户人工标记 PASS；package、测试、固定 Chromium 与 CI workflow 已落地。NVDA、hosted CI 与跨标签删除/PURGE 仍未执行，Gate 1 不因此提升为 PASS。
+- **当前状态：M3 adapter 工程实现推进中 / Gate 3a、3b CONDITIONAL**。M1 人工验收 PASS，Gate 1 尚有外部验收条件；M2 已提交真实只读源与 consent/retention，participant pilot 仍为 NOT_RUN。2026-09-08 用户明确要求推进 M3，当前实现与待验收边界见 [M3-ADAPTERS.md](M3-ADAPTERS.md)，不因此升级 Gate 1/2。
 
 ## 1. 全程约束
 

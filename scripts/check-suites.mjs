@@ -3,7 +3,7 @@ import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
-const PR_VITEST_SUITES = Object.freeze(['unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker', 'projection', 'evaluator', 'a11y', 'visual']);
+const PR_VITEST_SUITES = Object.freeze(['unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker', 'projection', 'runtime', 'evaluator', 'a11y', 'visual']);
 const CHROMIUM_PROJECTS = Object.freeze(['chromium-desktop', 'chromium-320']);
 const MINUTE_MS = 60_000;
 export const MAX_GITHUB_ARTIFACT_RETENTION_DAYS = 90;
@@ -326,7 +326,7 @@ function validatePlaywright(report, expectedFiles = [], options = {}) {
 export async function validateStructuredReport(reportPath, type, repoRoot = process.cwd(), expectedSuites = [], options = {}) {
   const actualRoot = await realpath(repoRoot);
   const actualReport = await trustedRealpath(actualRoot, reportPath, 'structured report');
-  const expectedFiles = expectedSuites.length ? (await validateSuiteSources(actualRoot, expectedSuites)).suites.flatMap((suite) => suite.files) : [];
+  const expectedFiles = [...(expectedSuites.length ? (await validateSuiteSources(actualRoot, expectedSuites)).suites.flatMap((suite) => suite.files) : []), ...(options.expectedFiles ?? [])];
   const runnerOptions = options.requireAllE2E
     ? { ...options, expectedSpecs: await collectPlaywrightRegistry(actualRoot) }
     : options;

@@ -127,6 +127,7 @@ test('structured Vitest reports reject malformed, zero, and skipped results', as
     const missingSuite = join(root, 'missing-suite.json');
     await writeFile(missingSuite, JSON.stringify({ ...validVitest, testResults: [{ name: `${root}/tests/unit/a.test.ts`, status: 'passed', assertionResults: [{ status: 'passed' }] }] }));
     await assert.rejects(validateStructuredReport(missingSuite, 'vitest', root, ['privacy']), /missing required suite: privacy/);
+    await assert.rejects(validateStructuredReport(missingSuite, 'vitest', root, [], { expectedFiles: ['tests/privacy/m2-consent.test.ts'] }), /missing required file/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -1,6 +1,8 @@
 import { hashCanonical, sha256 } from '../domain/canonical';
 import type { Hash } from '../domain/types';
 import type { RuntimeStoragePort } from '../application/storagePort';
+import type { ProjectionChangePage, ProjectionStoragePort } from '../application/projectionPort';
+import type { ChangeRecord } from '../application/storageContracts';
 import { toStoredRecord } from '../application/storageContracts';
 export { makeBatch, toStoredRecord } from '../application/storageContracts';
 import {
@@ -647,7 +649,50 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     });
   }
 
-  async publishProjection(next: ProjectionHeadRecord, expectedSourceCursor: Cursor): Promise<{ applied: boolean; head: ProjectionHeadRecord }> {
+  async loadChangesSince(after: Cursor, limit = 500): Promise<ProjectionChangePage> {
+    if (!/^(0|[1-9]\d*)$/.test(after) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new M1bError('ERR_CHANGE_CURSOR');
+    const db = await this.database();
+    const tx = db.transaction(['meta', 'changes', 'business'], 'readonly');
+    const done = transactionDone(tx);
+    try {
+      const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
+      assertMetaWatermarks(meta);
+      if (meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_RECOVERY_REQUIRED');
+      if (BigInt(after) > BigInt(meta.cursor)) throw new M1bError('ERR_CHANGE_CURSOR');
+      // ponytail: current change index uses string cursors; numeric sort avoids 10-before-2.
+      // Switch to a numeric compound index if the retained log outgrows local pilot scale.
+      const all = await requestValue<ChangeRecord[]>(tx.objectStore('changes').getAll());
+      if (all.some((change) => !/^(0|[1-9]\d*)$/.test(change.cursor) || !['put', 'delete'].includes(change.change))) throw new M1bError('ERR_CHANGE_CORRUPT');
+      const changes = all.filter((change) => BigInt(change.cursor) > BigInt(after) && BigInt(change.cursor) <= BigInt(meta.cursor));
+      changes.sort((a, b) => BigInt(a.cursor) < BigInt(b.cursor) ? -1 : BigInt(a.cursor) > BigInt(b.cursor) ? 1 : a.id.localeCompare(b.id));
+      let cursor = BigInt(after);
+      let gap = false;
+      for (const next of new Set(changes.map((change) => change.cursor))) {
+        if (BigInt(next) !== cursor + 1n) gap = true;
+        cursor = BigInt(next);
+      }
+      const fullSnapshotRequired = gap || cursor !== BigInt(meta.cursor) || changes.length > limit
+        || changes.some((change) => change.change === 'delete')
+        || (meta.lastPurgeCursor !== undefined && BigInt(meta.lastPurgeCursor) > BigInt(after));
+      const records: StoredRecord[] = [];
+      if (!fullSnapshotRequired) {
+        for (const recordId of new Set(changes.filter((change) => change.recordType === 'work_model_claim_v1').map((change) => change.recordId))) {
+          const record = await requestValue<StoredRecord | undefined>(tx.objectStore('business').get(recordId));
+          if (!record) throw new M1bError('ERR_CHANGE_GAP');
+          assertCanonicalHash(record, 'ERR_BUSINESS_RECORD_HASH_INVALID');
+          records.push(record);
+        }
+      }
+      await done;
+      return { meta, changes: fullSnapshotRequired ? [] : changes, records, fullSnapshotRequired };
+    } catch (error) {
+      safeAbort(tx);
+      await done.catch(() => undefined);
+      throw normalizeIdbError(error);
+    }
+  }
+
+  async publishProjection(next: ProjectionHeadRecord, expectedSourceCursor: Cursor, expected?: Parameters<ProjectionStoragePort['publishProjection']>[2]): Promise<{ applied: boolean; head: ProjectionHeadRecord }> {
     return this.withRootMutation(async () => {
     const db = await this.database();
     const tx = this.mutationTransaction(db, ['meta', 'projection'], 'readwrite');
@@ -657,8 +702,10 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
        assertProjectionHead(next, 'ERR_PROJECTION_HASH_INVALID');
       const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
       if (meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_RECOVERY_REQUIRED');
+      if (expected && (meta.privacyEpoch !== expected.privacyEpoch || meta.incarnation !== expected.incarnation || meta.cursor !== next.sourceCursor)) throw new M1bError('ERR_PROJECTION_STALE');
       assertNoPurgedReference({ kind: 'casProjectionHead', storeName: 'projection', expectedSourceCursor, next }, meta);
        const current = await requestValue<ProjectionHeadRecord | undefined>(store.get(next.projectionId));
+      if (expected && (current?.projectionHash ?? null) !== expected.projectionHash) throw new M1bError('ERR_PROJECTION_CONFLICT');
       const actual = current?.sourceCursor ?? '0';
       if (actual !== expectedSourceCursor) throw new M1bError('ERR_PROJECTION_STALE');
       if (BigInt(next.sourceCursor) < BigInt(actual) || BigInt(next.sourceCursor) > BigInt(meta.cursor)) throw new M1bError('ERR_PROJECTION_STALE');

@@ -71,6 +71,6 @@
 
 - Fork pool 单测：160/160 通过；`typecheck`、`lint`、production build、CSP、suite completeness 和 production artifact 检查均通过。
 - Chromium 双视口 E2E：30/30 通过；包含人工 `manual.check` 写入、脱敏 TRACE 审计和显式导出核验。生产 artifact 状态为 `CLEAN`，build identity 为 `303478ed0a3b1fc961737642b51406e3e24dc536ffb4c3ac478cbdd58e0c0d19`。
-- M2 pilot evidence tooling：5/5 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding 和失败日志。
-- Release gates：13 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
+- M2 pilot evidence tooling：6/6 通过；覆盖严格字段/隐私拒绝、participant-level 统计、确定性区间、artifact binding、CLI 和失败日志。
+- Release gates：14 项通过，1 项显式 `SKIP`（Windows 不执行 POSIX 超时测试），无失败；SKIP 仍不等于真实 live-model 或外部人工证据。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 仍是 `CONDITIONAL`；NVDA、人工视觉批准、participant pilot、真实 live-model evaluation 等外部证据不可由自动化替代。

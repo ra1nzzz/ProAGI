@@ -42,6 +42,7 @@ const behaviorEventSchema: z.ZodType<BehaviorEvent> = z.object({
   }).strict(),
   source: z.union([
     z.object({ kind: z.literal('fixture'), fixtureId: safeString, adapterId: safeString, adapterVersion: safeString }).strict(),
+    z.object({ kind: z.literal('json-import'), importBatchId: safeString, sourceItemKey: safeString, adapterId: safeString, adapterVersion: safeString }).strict(),
     z.object({ kind: z.literal('readonly-adapter'), sourceItemKey: safeString, adapterId: safeString, adapterVersion: safeString, consentId: safeString, policyVersion: safeString, purpose: safeString }).strict(),
   ]),
   privacy: z.object({

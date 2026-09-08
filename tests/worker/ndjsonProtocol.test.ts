@@ -100,7 +100,7 @@ describe('raw byte NDJSON worker protocol', () => {
     };
     const dispose = installNdjsonWorker(scope);
     const send = (data: NdjsonWorkerInput) => scope.onmessage?.({ data } as MessageEvent<NdjsonWorkerInput>);
-    send({ type: 'INIT', streamId: 'boundary', header: { ...header, declaredEventCount: 0 }, maxChunkBytes: 262_144, maxUnacked: 2 });
+    send({ type: 'INIT', streamId: 'boundary', header: { ...header, declaredEventCount: 0 }, maxChunkBytes: 262_144, maxUnacked: 2, decoder: 'utf-8-fatal-stream-v1' });
     send({ type: 'CHUNK', streamId: 'boundary', chunkId: 'one', sequence: '0', bytes: new TextEncoder().encode('\n').buffer, byteLength: 1 });
     expect(posted.at(-1)?.message).toMatchObject({ type: 'VALIDATED', streamId: 'boundary', chunkId: 'one', sequence: '0' });
     send({ type: 'CHUNK', streamId: 'boundary', chunkId: 'two', sequence: '1', bytes: new TextEncoder().encode('\n').buffer, byteLength: 1 });
@@ -113,7 +113,7 @@ describe('raw byte NDJSON worker protocol', () => {
     const errors: unknown[] = [];
     const errorScope: WorkerMessageScope = { onmessage: null, postMessage: (message) => { errors.push(message); } };
     installNdjsonWorker(errorScope);
-    errorScope.onmessage?.({ data: { type: 'INIT', streamId: 'errors', header: { ...header, declaredEventCount: 0 }, maxChunkBytes: 262_144, maxUnacked: 2 } } as MessageEvent<NdjsonWorkerInput>);
+    errorScope.onmessage?.({ data: { type: 'INIT', streamId: 'errors', header: { ...header, declaredEventCount: 0 }, maxChunkBytes: 262_144, maxUnacked: 2, decoder: 'utf-8-fatal-stream-v1' } } as MessageEvent<NdjsonWorkerInput>);
     errorScope.onmessage?.({ data: { type: 'CHUNK', streamId: 'errors', chunkId: 'bad', sequence: '0', bytes: new Uint8Array([0xc3, 0x28]).buffer, byteLength: 2 } } as MessageEvent<NdjsonWorkerInput>);
     expect(errors.at(-1)).toMatchObject({ type: 'ERROR', errorCode: 'ERR_INVALID_UTF8' });
   });

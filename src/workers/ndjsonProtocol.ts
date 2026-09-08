@@ -45,6 +45,7 @@ export interface WorkerValidationReceipt {
   validatedEventCount: number;
   rejectedEventCount: number;
   orderedWorkerBytesHash?: Hash;
+  header?: NdjsonHeader;
   errorCode?: string;
 }
 
@@ -66,12 +67,16 @@ interface PendingValidation {
 
 export class NdjsonWorkerProtocol {
   private readonly decoder = new TextDecoder('utf-8', { fatal: true });
+  private readonly expectedHeader?: NdjsonHeader;
   private textBuffer = '';
   private readonly pending: PendingValidation[] = [];
   private readonly accepted: ValidatedEventCandidate[] = [];
   private readonly rejected: { itemKey: string; errorCode: string }[] = [];
   private readonly chunkHashes: Hash[] = [];
+  private nextChunkSequence = 0n;
   private nextSequence = 0n;
+  private parsedHeader?: NdjsonHeader;
+  private sawContentBeforeHeader = false;
   private footer?: { eventCount: number; orderedEventsHash: Hash };
   private rawChunkBytes = 0;
   private terminal?: WorkerCompleteMessage;
@@ -79,22 +84,27 @@ export class NdjsonWorkerProtocol {
 
   constructor(
     readonly streamId: string,
-    readonly header: NdjsonHeader,
+    expectedHeader?: NdjsonHeader,
     readonly maxChunkBytes = 262_144,
     readonly maxUnacked: 2 = 2,
   ) {
-    if (header.lineType !== 'header' || header.format !== 'proagi-behavior-events' || header.formatVersion !== '1') throw new WorkerProtocolError('ERR_NDJSON_HEADER');
-    if (!Number.isSafeInteger(header.declaredEventCount) || header.declaredEventCount < 0 || header.declaredEventCount > MAX_DECLARED_EVENTS) throw new WorkerProtocolError('ERR_NDJSON_COUNT');
+    this.expectedHeader = expectedHeader;
+    if (expectedHeader) assertNdjsonHeader(expectedHeader);
     if (maxChunkBytes > 262_144 || maxChunkBytes <= 0 || maxUnacked !== 2) throw new WorkerProtocolError('ERR_WORKER_LIMIT');
+  }
+
+  get header(): NdjsonHeader | undefined {
+    return this.parsedHeader ?? this.expectedHeader;
   }
 
   pushChunk(input: { streamId: string; chunkId: string; sequence: string; bytes: ArrayBuffer | Uint8Array; byteLength?: number }): PushResult {
     this.assertLive(input.streamId);
     const bytes = input.bytes instanceof Uint8Array ? input.bytes : new Uint8Array(input.bytes);
     const byteLength = input.byteLength ?? bytes.byteLength;
-    if (byteLength !== bytes.byteLength || byteLength > this.maxChunkBytes) throw new WorkerProtocolError('ERR_CHUNK_LIMIT');
+    if (byteLength !== bytes.byteLength || byteLength < 0 || byteLength > this.maxChunkBytes) throw new WorkerProtocolError('ERR_CHUNK_LIMIT');
     if (this.pending.length >= this.maxUnacked) return { status: 'backpressure', retainedByteLength: this.retainedByteLength };
     if (this.pending.some((item) => item.key === messageKey(input))) throw new WorkerProtocolError('ERR_WORKER_DUPLICATE_CHUNK');
+    if (!/^(0|[1-9][0-9]*)$/.test(input.sequence) || BigInt(input.sequence) !== this.nextChunkSequence) throw new WorkerProtocolError('ERR_WORKER_SEQUENCE');
     if (this.footer) throw new WorkerProtocolError('ERR_NDJSON_TRAILING_BYTES');
 
     let decoded: string;
@@ -110,6 +120,7 @@ export class NdjsonWorkerProtocol {
       throw new WorkerProtocolError('ERR_STREAM_LIMIT');
     }
     this.chunkHashes.push(hashRawBytes(bytes));
+    this.nextChunkSequence += 1n;
     this.textBuffer += decoded;
     const beforeAccepted = this.accepted.length;
     const beforeRejected = this.rejected.length;
@@ -150,9 +161,11 @@ export class NdjsonWorkerProtocol {
       this.consumeLine(this.textBuffer.endsWith('\r') ? this.textBuffer.slice(0, -1) : this.textBuffer);
       this.textBuffer = '';
     }
+    const header = this.header;
+    if (!header) return this.fail('ERR_NDJSON_HEADER');
     if (!this.footer) return this.fail('ERR_NDJSON_FOOTER');
     const expectedHash = orderedEventsHash(this.accepted);
-    if (this.accepted.length !== this.header.declaredEventCount || this.footer.eventCount !== this.header.declaredEventCount || this.footer.eventCount !== this.accepted.length || this.footer.orderedEventsHash !== expectedHash) return this.fail('ERR_NDJSON_COUNT_HASH');
+    if (this.accepted.length !== header.declaredEventCount || this.footer.eventCount !== header.declaredEventCount || this.footer.eventCount !== this.accepted.length || this.footer.orderedEventsHash !== expectedHash) return this.fail('ERR_NDJSON_COUNT_HASH');
     this.terminal = {
       type: 'COMPLETE',
       streamId: this.streamId,
@@ -160,10 +173,11 @@ export class NdjsonWorkerProtocol {
         streamId: this.streamId,
         state: 'validated',
         rawChunkBytes: this.rawChunkBytes,
-        declaredEventCount: this.header.declaredEventCount,
+        declaredEventCount: header.declaredEventCount,
         validatedEventCount: this.accepted.length,
         rejectedEventCount: this.rejected.length,
         orderedWorkerBytesHash: hashCanonical(this.chunkHashes),
+        header,
       },
     };
     return this.terminal;
@@ -180,9 +194,10 @@ export class NdjsonWorkerProtocol {
         streamId: this.streamId,
         state: 'cancelled',
         rawChunkBytes: this.rawChunkBytes,
-        declaredEventCount: this.header.declaredEventCount,
+        declaredEventCount: this.header?.declaredEventCount ?? 0,
         validatedEventCount: this.accepted.length,
         rejectedEventCount: this.rejected.length,
+        ...(this.header ? { header: this.header } : {}),
       },
     };
     return this.terminal;
@@ -232,12 +247,22 @@ export class NdjsonWorkerProtocol {
     }
     if (!parsed || typeof parsed !== 'object') throw new WorkerProtocolError('ERR_NDJSON_SCHEMA');
     const value = parsed as Record<string, unknown>;
-    if (value.lineType === 'header') throw new WorkerProtocolError('ERR_NDJSON_DUPLICATE_HEADER');
+    if (value.lineType === 'header') {
+      if (this.parsedHeader || this.sawContentBeforeHeader) throw new WorkerProtocolError('ERR_NDJSON_DUPLICATE_HEADER');
+      const parsedHeader = parseNdjsonHeader(value);
+      if (this.expectedHeader && hashCanonical(parsedHeader) !== hashCanonical(this.expectedHeader)) throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+      this.parsedHeader = parsedHeader;
+      return;
+    }
+    if (!this.header) throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+    this.sawContentBeforeHeader = true;
     if (value.lineType === 'footer') {
+      if (Object.keys(value).sort().join('|') !== 'eventCount|lineType|orderedEventsHash') throw new WorkerProtocolError('ERR_NDJSON_FOOTER');
       if (!Number.isSafeInteger(value.eventCount) || typeof value.orderedEventsHash !== 'string') throw new WorkerProtocolError('ERR_NDJSON_FOOTER');
       this.footer = { eventCount: value.eventCount as number, orderedEventsHash: value.orderedEventsHash as Hash };
       return;
     }
+    if (Object.keys(value).sort().join('|') !== 'event|lineType|sequence') throw new WorkerProtocolError('ERR_NDJSON_SCHEMA');
     if (value.lineType !== 'event' || typeof value.sequence !== 'string' || !value.event || typeof value.event !== 'object') throw new WorkerProtocolError('ERR_NDJSON_SCHEMA');
     if (!/^(0|[1-9][0-9]*)$/.test(value.sequence) || BigInt(value.sequence) !== this.nextSequence) throw new WorkerProtocolError('ERR_NDJSON_SEQUENCE');
     const event = value.event as Record<string, unknown>;
@@ -267,9 +292,10 @@ export class NdjsonWorkerProtocol {
         streamId: this.streamId,
         state: 'failed',
         rawChunkBytes: this.rawChunkBytes,
-        declaredEventCount: this.header.declaredEventCount,
+        declaredEventCount: this.header?.declaredEventCount ?? 0,
         validatedEventCount: this.accepted.length,
         rejectedEventCount: this.rejected.length,
+        ...(this.header ? { header: this.header } : {}),
         errorCode,
       },
     };
@@ -291,6 +317,37 @@ export function hashRawBytes(bytes: Uint8Array): Hash {
   let hex = '';
   for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
   return sha256(hex);
+}
+
+function parseNdjsonHeader(value: Record<string, unknown>): NdjsonHeader {
+  const header = value as Partial<NdjsonHeader>;
+  if (Object.keys(value).sort().join('|') !== 'declaredEventCount|format|formatVersion|inputIdentity|lineType|schemaVersion') throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+  if (header.lineType !== 'header' || header.format !== 'proagi-behavior-events' || header.formatVersion !== '1') {
+    throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+  }
+  if (typeof header.schemaVersion !== 'string' || !header.inputIdentity || typeof header.inputIdentity !== 'object' || Array.isArray(header.inputIdentity)) {
+    throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+  }
+  const declaredEventCount = header.declaredEventCount;
+  if (typeof declaredEventCount !== 'number' || !Number.isSafeInteger(declaredEventCount) || declaredEventCount < 0 || declaredEventCount > MAX_DECLARED_EVENTS) {
+    throw new WorkerProtocolError('ERR_NDJSON_COUNT');
+  }
+  const parsed: NdjsonHeader = {
+    lineType: 'header',
+    format: 'proagi-behavior-events',
+    formatVersion: '1',
+    schemaVersion: header.schemaVersion,
+    inputIdentity: header.inputIdentity,
+    declaredEventCount,
+  };
+  assertNdjsonHeader(parsed);
+  return parsed;
+}
+
+function assertNdjsonHeader(header: NdjsonHeader): void {
+  if (header.lineType !== 'header' || header.format !== 'proagi-behavior-events' || header.formatVersion !== '1') throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+  if (typeof header.schemaVersion !== 'string' || !header.inputIdentity || typeof header.inputIdentity !== 'object' || Array.isArray(header.inputIdentity)) throw new WorkerProtocolError('ERR_NDJSON_HEADER');
+  if (!Number.isSafeInteger(header.declaredEventCount) || header.declaredEventCount < 0 || header.declaredEventCount > MAX_DECLARED_EVENTS) throw new WorkerProtocolError('ERR_NDJSON_COUNT');
 }
 
 function messageKey(input: { streamId: string; chunkId: string; sequence: string }): string {

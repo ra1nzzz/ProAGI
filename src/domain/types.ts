@@ -38,12 +38,24 @@ export interface FixtureInput {
   readonly events: readonly FixtureEventInput[];
 }
 
+export interface JsonImportInputIdentity {
+  readonly kind: 'json-import';
+  readonly importBatchId: string;
+  readonly inputHash: Hash;
+}
+
 export interface BehaviorEvent extends FixtureEventInput {
   readonly schemaVersion: '1.0.0';
   readonly id: string;
   readonly source: {
     readonly kind: 'fixture';
     readonly fixtureId: string;
+    readonly adapterId: string;
+    readonly adapterVersion: string;
+  } | {
+    readonly kind: 'json-import';
+    readonly importBatchId: string;
+    readonly sourceItemKey: string;
     readonly adapterId: string;
     readonly adapterVersion: string;
   } | {

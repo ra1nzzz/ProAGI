@@ -1,5 +1,5 @@
 import type { ReplaySnapshotV1 } from '../domain/replay';
-import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, JsonImportInputIdentity, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import type { ReadonlyInputOptions, ReadonlyMaterializationOptions, ReadonlyParseResult } from '../domain/readonlySource';
 import type { CorrectionResult } from './knowledge';
 import type { ImportCommit } from './insightService';
@@ -59,8 +59,10 @@ export interface ObservationPreviewDTO {
   readonly acceptedCount: number;
   readonly episodeCount: number;
   readonly insightCount: number;
-  readonly source: 'bundled-synthetic-fixture' | 'readonly-test-results';
+  readonly source: 'bundled-synthetic-fixture' | 'readonly-test-results' | 'json-import';
+  readonly inputIdentity?: JsonImportInputIdentity;
   readonly inputHash?: string;
+  readonly importBatchId?: string;
   readonly consentId?: string;
   readonly expiresAt?: string;
   readonly rejected?: readonly { readonly itemKey: string; readonly code: string; readonly fieldPath: string }[];
@@ -69,6 +71,7 @@ export interface ObservationPreviewDTO {
 
 export interface ObservationPort {
   preview(): Promise<ObservationPreviewDTO>;
+  previewNdjson(stream: ReadableStream<Uint8Array>): Promise<ObservationPreviewDTO>;
   commit(token: string): Promise<ImportCommit>;
 }
 

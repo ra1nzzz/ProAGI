@@ -1,12 +1,14 @@
 import { makeBatch, toStoredRecord, CommitResponseLostError } from './storageContracts';
 import type { AtomicMutationBatch, StoredRecord } from './storageContracts';
 import { hashCanonical, sha256 } from '../domain/canonical';
-import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import { materializeJsonImportBehaviorEvents, parseFixtureJson } from '../domain/fixture';
+import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, JsonImportInputIdentity, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import { runInsightLoop } from '../domain/insightLoop';
 import type { ReadonlyObservationAdapter } from './ports';
 import { makeConsentGrant, makeConsentRevocation, makeRetentionPolicy, type ConsentGrant, type ConsentRevocation, type ReadonlyConsentSnapshot, type RetentionPolicy } from './m2Consent';
 import { developerDayFixture, developerDayFixtureJson } from '../fixtures/developerDay';
-import { validateBundledFixtureWithWorker } from '../workers/browserImport';
+import { validateBundledFixtureWithWorker, validateNdjsonStreamWithWorker } from '../workers/browserImport';
+import { orderedEventsHash } from '../workers/ndjsonProtocol';
 import type { CorrectionResult } from './knowledge';
 import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTIME_SNAPSHOT_EVENT, type ControlPort, type CorrectionPort, type ExternalPurgeNotification, type InsightServicePort, type ObservationPort, type ObservationPreviewDTO, type PurgeCommittedNotification, type RuntimeErrorNotification, type RuntimeNotificationPort, type RuntimeSnapshotNotification } from './ports';
 import type { ImportCommit } from './insightService';
@@ -98,13 +100,31 @@ function decodePurgeChannelMessage(value: unknown): PurgeChannelMessage | undefi
   return undefined;
 }
 
-type PendingPreview = {
+type GuardPendingPreview = {
+  readonly kind: 'guard';
   readonly candidate: InsightServicePort;
   readonly commit: ImportCommit;
   readonly token: string;
   readonly batch: AtomicMutationBatch;
   readonly createdAt: number;
 };
+
+type NdjsonPendingPreview = {
+  readonly kind: 'ndjson';
+  readonly candidate: InsightServicePort;
+  readonly commit: ImportCommit;
+  readonly token: string;
+  readonly createdAt: number;
+  readonly streamId: string;
+  readonly inputIdentity: JsonImportInputIdentity;
+  readonly appCanonicalEventsHash: Hash;
+  readonly workerRawBytes: number;
+  readonly privacyEpoch: number;
+  readonly events: readonly BehaviorEvent[];
+  readonly records: readonly StoredRecord[];
+};
+
+type PendingPreview = GuardPendingPreview | NdjsonPendingPreview;
 
 export interface BrowserRuntimeSnapshot {
   readonly observationMode: 'ACTIVE' | 'PRIVATE';
@@ -339,7 +359,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.pendingPreview = null;
     this.imported = null;
     this.service = this.serviceFactory();
-    if (pending) await this.bestEffort('release-runtime-preview-cancel', () => this.adapter.cancelPreview(pending.token));
+    if (pending?.kind === 'guard') await this.bestEffort('release-runtime-preview-cancel', () => this.adapter.cancelPreview(pending.token));
   }
 
   private async enforcePurgeFence(): Promise<void> {
@@ -519,7 +539,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       assertConsentRecord(currentPolicyRecord);
       const pending = this.pendingPreview;
       this.pendingPreview = null;
-      if (pending) await this.bestEffort('retention-preview-cancel', () => this.adapter.cancelPreview(pending.token));
+      if (pending?.kind === 'guard') await this.bestEffort('retention-preview-cancel', () => this.adapter.cancelPreview(pending.token));
       const meta = await this.adapter.getMeta();
       const nextPolicyRecord = toStoredRecord(policyRecordId, 'retention_policy_v1', policy, new Date(now).toISOString());
       const batch = makeBatch({
@@ -606,7 +626,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       });
       try {
         await this.adapter.bindPreviewBatch(staged.token, batch.batchHash);
-        this.pendingPreview = { candidate, commit, token: staged.token, batch, createdAt: now };
+        this.pendingPreview = { kind: 'guard', candidate, commit, token: staged.token, batch, createdAt: now };
         return {
           token: staged.token, acceptedCount: parsed.parsed.accepted.length, episodeCount: commit.output.episodes.length,
           insightCount: commit.output.claims.length, source: 'readonly-test-results', inputHash: parsed.inputHash,
@@ -617,6 +637,61 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         throw error;
       }
     }, false, 'runtime.preview-readonly');
+  }
+
+  async previewNdjson(stream: ReadableStream<Uint8Array>): Promise<ObservationPreviewDTO> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      if (!this.workerFactory) throw new Error('ERR_WORKER_UNAVAILABLE');
+      if (this.imported || this.pendingPreview) throw new Error('ERR_PREVIEW_ALREADY_EXISTS');
+      const generation = this.operationGeneration;
+      const now = readM2Clock(this.clock);
+      const meta = await this.adapter.getMeta();
+      if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
+      const validation = await validateNdjsonStreamWithWorker({ stream, workerFactory: this.workerFactory });
+      if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
+      const latestMeta = await this.adapter.getMeta();
+      if (latestMeta.privacyEpoch !== meta.privacyEpoch || latestMeta.observationMode !== 'ACTIVE' || latestMeta.recoveryMode !== 'NORMAL') throw new Error('ERR_PRIVACY_EPOCH_STALE');
+      const inputIdentity = parseJsonImportIdentity(validation.header.inputIdentity);
+      if (inputIdentity.inputHash !== orderedEventsHash(validation.candidates)) throw new Error('ERR_NDJSON_INPUT_HASH');
+      if (validation.rejected.length > 0) throw new Error('ERR_NDJSON_REJECTED');
+      const parsed = parseFixtureJson(JSON.stringify({
+        schemaVersion: validation.header.schemaVersion,
+        fixtureId: 'json-import',
+        adapterId: 'synthetic-fixture',
+        adapterVersion: '1.0.0',
+        events: validation.candidates.map(({ event }) => event),
+      }));
+      if (parsed.rejected.length > 0 || parsed.accepted.length !== validation.candidates.length) throw new Error('ERR_APP_SCHEMA_INVALID');
+      const events = materializeJsonImportBehaviorEvents(parsed.accepted, inputIdentity);
+      events.forEach(assertApplicationBehaviorEvent);
+      const candidate = this.serviceFactory();
+      const commit = buildJsonImport(candidate, events, inputIdentity);
+      const records = recordsForCommit(commit, now);
+      const token = crypto.randomUUID();
+      const pending: NdjsonPendingPreview = {
+        kind: 'ndjson', candidate, commit, token, createdAt: now, streamId: validation.receipt.streamId,
+        inputIdentity, appCanonicalEventsHash: hashCanonical(events),
+        workerRawBytes: validation.receipt.rawChunkBytes, privacyEpoch: meta.privacyEpoch, events, records,
+      };
+      const releaseMutation = this.adapter.beginInProcessRootMutation();
+      try {
+        if (generation !== this.operationGeneration || this.closed) throw new Error('ERR_OPERATION_STALE');
+        this.pendingPreview = pending;
+      } finally {
+        releaseMutation();
+      }
+      await this.trace.record({
+        eventName: 'runtime.worker', correlationId: crypto.randomUUID(), resultCode: 'OK',
+        counts: { events: validation.receipt.validatedEventCount, bytes: validation.receipt.rawChunkBytes },
+      }).catch(() => undefined);
+      return {
+        token, acceptedCount: events.length, episodeCount: commit.output.episodes.length, insightCount: commit.output.claims.length,
+        source: 'json-import', inputIdentity, inputHash: inputIdentity.inputHash, importBatchId: inputIdentity.importBatchId,
+        expiresAt: new Date(now + READONLY_PREVIEW_TTL_MS).toISOString(), rejected: [], diagnostics: [],
+      };
+    }, false, 'runtime.preview-ndjson');
   }
 
   async revokeReadonlyConsent(consentId?: string): Promise<void> {
@@ -630,7 +705,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       if (snapshot.revoked) return;
       const pending = this.pendingPreview;
       this.pendingPreview = null;
-      if (pending) await this.bestEffort('revoke-preview-cancel', () => this.adapter.cancelPreview(pending.token));
+      if (pending?.kind === 'guard') await this.bestEffort('revoke-preview-cancel', () => this.adapter.cancelPreview(pending.token));
       const meta = await this.adapter.getMeta();
       const revocation = makeConsentRevocation({ id: crypto.randomUUID(), consentId: id, revokedAt: new Date(readM2Clock(this.clock)).toISOString(), reason: 'user', privacyEpochAfter: meta.privacyEpoch + 1 });
       const record = toStoredRecord(`consent-revocation:${id}`, 'consent_revocation_v1', revocation);
@@ -710,7 +785,9 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.start();
       await this.enforcePurgeFence();
       if (!this.pendingPreview || this.pendingPreview.token !== token) throw new Error('ERR_PREVIEW_STALE');
-      return this.commitBundled();
+      return this.pendingPreview.kind === 'ndjson'
+        ? this.commitNdjsonInternal(this.pendingPreview)
+        : this.commitBundledInternal();
     }, false, 'runtime.commit');
   }
 
@@ -746,7 +823,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     await this.start();
     await this.enforcePurgeFence();
     if (this.imported) return this.imported;
-    if (this.pendingPreview) return this.pendingPreview.commit;
+    if (this.pendingPreview) {
+      if (this.pendingPreview.kind !== 'guard') throw new Error('ERR_PREVIEW_ALREADY_EXISTS');
+      return this.pendingPreview.commit;
+    }
     this.previewing ??= this.createBundledPreview(now).finally(() => { this.previewing = null; });
     return this.previewing;
   }
@@ -791,7 +871,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const releaseMutation = this.adapter.beginInProcessRootMutation();
       try {
         if (generation !== this.operationGeneration || this.closed) throw new Error('ERR_OPERATION_STALE');
-        this.pendingPreview = { candidate, commit: receipt.result, token: staged.token, batch, createdAt: now };
+        this.pendingPreview = { kind: 'guard', candidate, commit: receipt.result, token: staged.token, batch, createdAt: now };
       } finally {
         releaseMutation();
       }
@@ -811,7 +891,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
     if (this.imported) return this.imported;
     const pending = this.pendingPreview;
-    if (!pending) throw new Error('ERR_PREVIEW_REQUIRED');
+    if (!pending || pending.kind !== 'guard') throw new Error('ERR_PREVIEW_REQUIRED');
     let committedCursor: string | undefined;
     try {
       try {
@@ -873,6 +953,64 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       } finally {
         releaseMutation();
       }
+    } finally {
+      if (committedCursor !== undefined && this.ownCommitCursor === committedCursor) this.ownCommitCursor = null;
+    }
+  }
+
+  private async commitNdjsonInternal(pending: NdjsonPendingPreview): Promise<ImportCommit> {
+    const generation = this.operationGeneration;
+    await this.start();
+    await this.enforcePurgeFence();
+    if (generation !== this.operationGeneration || this.closed || this.pendingPreview !== pending) throw new Error('ERR_OPERATION_STALE');
+    const meta = await this.adapter.getMeta();
+    if (meta.observationMode !== 'ACTIVE' || meta.recoveryMode !== 'NORMAL' || meta.privacyEpoch !== pending.privacyEpoch) throw new Error('ERR_PRIVACY_EPOCH_STALE');
+    const sessionId = crypto.randomUUID();
+    let sessionCreated = false;
+    let committedCursor: string | undefined;
+    try {
+      let session = await this.adapter.createImportSession(pending.streamId, sessionId, pending.inputIdentity);
+      sessionCreated = true;
+      const batches = splitImportRecords(pending.records);
+      if (hashCanonical(pending.events) !== pending.appCanonicalEventsHash) throw new Error('ERR_APP_EVENT_HASH');
+      for (const batch of batches) {
+        if (generation !== this.operationGeneration || this.closed) throw new Error('ERR_OPERATION_STALE');
+        session = await this.adapter.stageImportBatch(sessionId, batch, hashCanonical(batch));
+      }
+      if (session.committedEventCount !== pending.records.length || session.committedBatchHashes.length !== batches.length) throw new Error('ERR_IMPORT_COUNT_MISMATCH');
+      const publishIdempotencyKey = crypto.randomUUID();
+      const expectedPublishHash = hashCanonical({ kind: 'publish-import', sessionId, hashes: session.committedBatchHashes });
+      const published = await this.adapter.publishImportSession(sessionId, publishIdempotencyKey);
+      if (!published.applied || published.ledger.idempotencyKey !== publishIdempotencyKey || published.ledger.batchHash !== expectedPublishHash) throw new Error('ERR_IMPORT_RECEIPT_INVALID');
+      committedCursor = published.cursor;
+      this.ownCommitCursor = committedCursor;
+      this.purgeChannel?.postMessage({ type: 'STATE_CHANGED', clientId: this.clientId });
+      await this.testHooks.afterCommitPersisted?.();
+      const committedMeta = await this.adapter.getMeta();
+      if (committedCursor === undefined || committedMeta.cursor !== committedCursor || committedMeta.privacyEpoch !== pending.privacyEpoch || committedMeta.recoveryMode !== 'NORMAL') throw new Error('ERR_CURSOR_CONFLICT');
+      await this.enforcePurgeFence();
+      if (generation !== this.operationGeneration) throw new Error('ERR_OPERATION_STALE');
+      const finalMeta = await this.adapter.getMeta();
+      if (finalMeta.cursor !== committedMeta.cursor || finalMeta.privacyEpoch !== committedMeta.privacyEpoch || finalMeta.recoveryMode !== 'NORMAL') throw new Error('ERR_CURSOR_CONFLICT');
+      const releaseMutation = this.adapter.beginInProcessRootMutation();
+      try {
+        if (generation !== this.operationGeneration || this.pendingPreview !== pending) throw new Error('ERR_OPERATION_STALE');
+        this.lastDurableCursor = finalMeta.cursor;
+        this.lastStorageIncarnation = finalMeta.incarnation ?? null;
+        this.service = pending.candidate;
+        this.imported = pending.commit;
+        this.pendingPreview = null;
+      } finally {
+        releaseMutation();
+      }
+      await this.trace.record({
+        eventName: 'runtime.import', correlationId: crypto.randomUUID(), resultCode: 'OK',
+        counts: { events: pending.events.length, bytes: pending.workerRawBytes, claims: pending.commit.output.claims.length },
+      }).catch(() => undefined);
+      return pending.commit;
+    } catch (error) {
+      if (sessionCreated) await this.bestEffort('import-session-cancel', () => this.adapter.cancelImportSession(sessionId));
+      throw error;
     } finally {
       if (committedCursor !== undefined && this.ownCommitCursor === committedCursor) this.ownCommitCursor = null;
     }
@@ -1359,7 +1497,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await startup?.catch((error) => this.reportBackgroundFailure('close-startup', error));
       await clearing?.catch((error) => this.reportBackgroundFailure('close-clearing', error));
       await operations;
-      if (pending) await this.bestEffort('close-preview-cancel', () => adapter.cancelPreview(pending.token));
+      if (pending?.kind === 'guard') await this.bestEffort('close-preview-cancel', () => adapter.cancelPreview(pending.token));
       if (this.clientRegistered) {
         await this.bestEffort('close-client', () => adapter.closeClient(this.clientId));
         this.clientRegistered = false;
@@ -1412,6 +1550,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         events, output, acceptedCount: events.length, rejectedCount: 0,
         ...(events[0]?.source.kind === 'readonly-adapter' ? {
           source: 'readonly-test-results' as const, consentId: events[0].source.consentId, sourceItemKey: events[0].source.sourceItemKey,
+        } : events[0]?.source.kind === 'json-import' ? {
+          source: 'json-import' as const, importBatchId: events[0].source.importBatchId,
         } : {}),
       });
     }
@@ -1459,7 +1599,7 @@ function recordsForCommit(commit: ImportCommit, asOf: number, retention?: Retent
     ...output.skillCandidates.map((payload) => ({ id: payload.id, type: 'skill_candidate_v1', payload })),
     ...output.actionIntents.map((payload) => ({ id: payload.id, type: 'action_intent_v1', payload })),
     { id: output.report.id, type: 'daily_report_snapshot_v1', payload: output.report },
-    ...(!retention ? [{ id: FIXTURE_MARKER_ID, type: 'fixture_commit_v1', payload: { asOf, fixtureId: 'developer-day-bundled-v1' } satisfies FixtureMarker }] : []),
+    ...(!retention && commit.source !== 'json-import' ? [{ id: FIXTURE_MARKER_ID, type: 'fixture_commit_v1', payload: { asOf, fixtureId: 'developer-day-bundled-v1' } satisfies FixtureMarker }] : []),
   ];
   const eventExpiresAt = retention ? new Date(asOf + retention.eventTtlDays * 86_400_000).toISOString() : undefined;
   const derivedExpiresAt = retention ? new Date(asOf + retention.derivedTtlDays * 86_400_000).toISOString() : undefined;
@@ -1469,6 +1609,17 @@ function recordsForCommit(commit: ImportCommit, asOf: number, retention?: Retent
     consentId: retention.consentId,
     expiresAt: entity.type === 'behavior_event_v1' ? eventExpiresAt : derivedExpiresAt,
   } : {}));
+}
+
+function buildJsonImport(service: InsightServicePort, events: readonly BehaviorEvent[], identity: JsonImportInputIdentity): ImportCommit {
+  const knowledge = service.knowledgeSnapshot();
+  service.restoreEvents(events);
+  const output = runInsightLoop(events, { asOf: latestEventAt(events), timezone: 'UTC', knowledge });
+  service.hydrateKnowledge({ ...knowledge, claims: [...knowledge.claims, ...output.claims.filter((claim) => !knowledge.claims.some((known) => known.id === claim.id))] });
+  return Object.freeze({
+    events, output, acceptedCount: events.length, rejectedCount: 0, source: 'json-import' as const,
+    importBatchId: identity.importBatchId,
+  });
 }
 
 function buildReadonlyImport(
@@ -1490,6 +1641,41 @@ function buildReadonlyImport(
 
 function latestEventAt(events: readonly BehaviorEvent[]): string {
   return events.reduce((latest, event) => event.occurredAt > latest ? event.occurredAt : latest, '1970-01-01T00:00:00.000Z');
+}
+
+function parseJsonImportIdentity(value: unknown): JsonImportInputIdentity {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ERR_INPUT_IDENTITY_INVALID');
+  const candidate = value as Record<string, unknown>;
+  const keys = Object.keys(candidate).sort().join('|');
+  if (keys !== 'importBatchId|inputHash|kind' || candidate.kind !== 'json-import'
+    || typeof candidate.importBatchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate.importBatchId)
+    || typeof candidate.inputHash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(candidate.inputHash)) throw new Error('ERR_INPUT_IDENTITY_INVALID');
+  return { kind: 'json-import', importBatchId: candidate.importBatchId, inputHash: candidate.inputHash as Hash };
+}
+
+function assertApplicationBehaviorEvent(event: BehaviorEvent): void {
+  const decoded = decodeBehaviorEvent(event);
+  if (hashCanonical({ ...decoded, id: undefined, contentHash: undefined }) !== decoded.contentHash) throw new Error('ERR_APP_EVENT_HASH');
+}
+
+function splitImportRecords(records: readonly StoredRecord[]): readonly (readonly StoredRecord[])[] {
+  const maxBytes = 4 * 1024 * 1024;
+  const batches: StoredRecord[][] = [];
+  let current: StoredRecord[] = [];
+  let currentBytes = 2;
+  for (const record of records) {
+    const mutationBytes = new TextEncoder().encode(JSON.stringify({ kind: 'insertImmutable', storeName: 'business', record })).byteLength;
+    if (mutationBytes + 2 > maxBytes) throw new Error('ERR_BATCH_LIMIT');
+    if (current.length >= 500 || (current.length > 0 && currentBytes + mutationBytes + 1 > maxBytes)) {
+      batches.push(current);
+      current = [];
+      currentBytes = 2;
+    }
+    current.push(record);
+    currentBytes += mutationBytes + (current.length > 1 ? 1 : 0);
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 function readM2Clock(clock: () => number): number {
@@ -1598,6 +1784,36 @@ const RUNTIME_ERROR_DISPOSITION: Readonly<Record<string, RuntimeErrorDisposition
   ERR_RETENTION_POLICY_INVALID: 'expected',
   ERR_NO_ACCEPTED_EVENTS: 'expected',
   ERR_PREVIEW_ALREADY_EXISTS: 'expected',
+  ERR_WORKER_UNAVAILABLE: 'expected',
+  ERR_WORKER_FAILURE: 'expected',
+  ERR_WORKER_STREAM: 'expected',
+  ERR_WORKER_ACK_MISMATCH: 'expected',
+  ERR_WORKER_BYTES_HASH: 'expected',
+  ERR_WORKER_RECEIPT_INVALID: 'expected',
+  ERR_WORKER_VALIDATION: 'expected',
+  ERR_WORKER_BACKPRESSURE: 'expected',
+  ERR_WORKER_DECODER: 'expected',
+  ERR_WORKER_SEQUENCE: 'expected',
+  ERR_INVALID_UTF8: 'expected',
+  ERR_STREAM_LIMIT: 'expected',
+  ERR_LINE_LIMIT: 'expected',
+  ERR_NDJSON_HEADER: 'expected',
+  ERR_NDJSON_COUNT: 'expected',
+  ERR_NDJSON_FOOTER: 'expected',
+  ERR_NDJSON_JSON: 'expected',
+  ERR_NDJSON_SCHEMA: 'expected',
+  ERR_NDJSON_SEQUENCE: 'expected',
+  ERR_NDJSON_COUNT_HASH: 'expected',
+  ERR_NDJSON_TRAILING_BYTES: 'expected',
+  ERR_NDJSON_DUPLICATE_HEADER: 'expected',
+  ERR_NDJSON_INPUT_HASH: 'expected',
+  ERR_NDJSON_REJECTED: 'expected',
+  ERR_APP_SCHEMA_INVALID: 'expected',
+  ERR_APP_EVENT_HASH: 'fault',
+  ERR_INPUT_IDENTITY_INVALID: 'expected',
+  ERR_IMPORT_RECEIPT_INVALID: 'fault',
+  ERR_IMPORT_COUNT_MISMATCH: 'fault',
+  ERR_RECORD_HASH_INVALID: 'fault',
   ERR_DELETE_REACHABLE_READONLY: 'fault',
 });
 

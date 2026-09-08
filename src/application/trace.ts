@@ -27,6 +27,7 @@ export const TRACE_EVENT_NAMES = Object.freeze([
   'runtime.preview-bundled',
   'runtime.commit-bundled',
   'runtime.preview-readonly',
+  'runtime.preview-ndjson',
   'runtime.grant-consent',
   'runtime.revoke-consent',
   'runtime.shorten-retention',

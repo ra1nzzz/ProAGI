@@ -1,7 +1,7 @@
 import { NdjsonWorkerProtocol, WorkerProtocolError, type NdjsonHeader } from './ndjsonProtocol';
 
 export type NdjsonWorkerInput =
-  | { type: 'INIT'; streamId: string; header: NdjsonHeader; maxChunkBytes: number; maxUnacked: 2 }
+  | { type: 'INIT'; streamId: string; header?: NdjsonHeader; maxChunkBytes: number; maxUnacked: 2; decoder: 'utf-8-fatal-stream-v1' }
   | { type: 'CHUNK'; streamId: string; chunkId: string; sequence: string; bytes: ArrayBuffer; byteLength: number }
   | { type: 'ACK'; streamId: string; chunkId: string; sequence: string }
   | { type: 'CANCEL'; streamId: string }
@@ -19,6 +19,7 @@ export function installNdjsonWorker(scope: WorkerMessageScope): () => void {
     try {
       if (message.type === 'INIT') {
         if (protocol) throw new WorkerProtocolError('ERR_WORKER_ALREADY_INITIALIZED');
+        if (message.decoder !== 'utf-8-fatal-stream-v1') throw new WorkerProtocolError('ERR_WORKER_DECODER');
         protocol = new NdjsonWorkerProtocol(message.streamId, message.header, message.maxChunkBytes, message.maxUnacked);
         return;
       }

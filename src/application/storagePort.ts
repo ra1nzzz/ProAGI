@@ -15,7 +15,8 @@ import type {
   StoredRecord,
   StorageKey,
 } from './storageContracts';
-import type { Hash } from '../domain/types';
+import type { Hash, JsonImportInputIdentity } from '../domain/types';
+import type { ImportSessionRecord } from '../adapters/m1bTypes';
 
 export interface RuntimeRootHooks {
   readonly freeze: () => void;
@@ -69,4 +70,8 @@ export interface RuntimeStoragePort {
   stealRecoveryLease(ownerClientId: string, now?: number): Promise<RecoveryLeaseRecord>;
   clearAll(options?: { readonly simulateBlocked?: boolean; readonly cachesCleared?: boolean; readonly deleteTimeoutMs?: number; readonly quiescenceTimeoutMs?: number }): Promise<ClearAllResult>;
   revokeConsent(consentId: string, revocation: StoredRecord, expectedCursor: Cursor, expectedPrivacyEpoch: number, idempotencyKey: string): Promise<CommitResult>;
+  createImportSession(streamId: string, sessionId?: string, inputIdentity?: JsonImportInputIdentity): Promise<ImportSessionRecord>;
+  stageImportBatch(sessionId: string, records: readonly StoredRecord[], batchHash: Hash): Promise<ImportSessionRecord>;
+  publishImportSession(sessionId: string, idempotencyKey: string): Promise<CommitResult>;
+  cancelImportSession(sessionId: string): Promise<void>;
 }

@@ -1,4 +1,5 @@
 import { expect, test, type CDPSession, type Page } from '@playwright/test';
+import { orderedEventsHash, type ValidatedEventCandidate } from '../../src/workers/ndjsonProtocol';
 
 async function setLifecycleState(session: CDPSession, state: 'frozen' | 'active'): Promise<void> {
   await session.send('Page.enable');
@@ -120,6 +121,46 @@ test('runs bundled import, immutable correction, and Replay in the browser', asy
   await expect(page.getByRole('button', { name: '运行 Replay' })).toBeEnabled();
   await page.getByRole('button', { name: '运行 Replay' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('Replay 完成');
+});
+
+test('imports a user-selected NDJSON file through Worker and ImportSession', async ({ page }) => {
+  await page.goto('/');
+  const candidates: ValidatedEventCandidate[] = [{
+    sequence: '0',
+    event: {
+      sourceItemKey: 'user-file-event',
+      occurredAt: '2026-01-02T09:12:00.000Z',
+      kind: 'app.focus',
+      subject: { appId: 'vscode', projectKey: 'proagi' },
+      attributes: { appId: 'vscode', projectKey: 'proagi' },
+    },
+  }];
+  const header = {
+    lineType: 'header', format: 'proagi-behavior-events', formatVersion: '1', schemaVersion: '1.0.0',
+    inputIdentity: { kind: 'json-import', importBatchId: '00000000-0000-4000-8000-000000000001', inputHash: orderedEventsHash(candidates) },
+    declaredEventCount: candidates.length,
+  };
+  const ndjson = [
+    JSON.stringify(header),
+    ...candidates.map((candidate) => JSON.stringify({ lineType: 'event', ...candidate })),
+    JSON.stringify({ lineType: 'footer', eventCount: candidates.length, orderedEventsHash: orderedEventsHash(candidates) }),
+  ].join('\r\n');
+  await page.locator('[data-testid="ndjson-file"]').setInputFiles({ name: 'user-events.ndjson', mimeType: 'application/x-ndjson', buffer: Buffer.from(ndjson) });
+  await page.getByRole('button', { name: '预览 NDJSON' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('本地 NDJSON 预览已准备');
+  expect(await readStore(page, 'business')).toEqual([]);
+  await page.getByRole('button', { name: '确认导入' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('ImportSession 原子发布 1 条事件');
+  expect(await readStore(page, 'business')).toEqual(expect.arrayContaining([
+    expect.objectContaining({ recordType: 'behavior_event_v1', payload: expect.objectContaining({ source: expect.objectContaining({ kind: 'json-import' }) }) }),
+  ]));
+  expect(await readStore(page, 'system')).toEqual(expect.arrayContaining([
+    expect.objectContaining({ recordType: 'import_session', state: 'PUBLISHED' }),
+  ]));
+  expect(await readStore(page, 'audit')).toEqual(expect.arrayContaining([
+    expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.worker', resultCode: 'OK' }) }),
+    expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.import', resultCode: 'OK' }) }),
+  ]));
 });
 
 test('runs the consent-bound readonly flow and records its pilot evidence state', async ({ page }) => {

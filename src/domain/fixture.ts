@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { canonicalJson, hashCanonical, semanticId } from './canonical';
-import type { BehaviorEvent, FixtureEventInput, FixtureInput, Hash } from './types';
+import type { BehaviorEvent, FixtureEventInput, FixtureInput, Hash, JsonImportInputIdentity } from './types';
 
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const timestamp = z.string().regex(timestampPattern).refine((value) => {
@@ -103,32 +103,47 @@ function staticFieldPath(path: PropertyKey[] | undefined): string {
 }
 
 export function materializeBehaviorEvents(result: FixtureParseResult): readonly BehaviorEvent[] {
-  return result.accepted.map((input) => {
-    const source = {
-      kind: 'fixture' as const,
-      fixtureId: result.fixture.fixtureId,
-      adapterId: result.fixture.adapterId,
-      adapterVersion: result.fixture.adapterVersion,
-    };
-    const dedupeKey = hashCanonical({ source, sourceItemKey: input.sourceItemKey });
-    const factHash = hashCanonical({
-      occurredAt: input.occurredAt,
-      kind: input.kind,
-      subject: input.subject,
-      attributes: input.attributes,
-    });
-    const privacy = {
-      classification: 'local-sensitive' as const,
-      policyVersion: 'allowlist-v1' as const,
-      redactionCount: 0,
-    };
-    const provenanceHash = hashCanonical({ dedupeKey, factHash, source, privacy });
-    const semantic = { schemaVersion: '1.0.0' as const, ...input, source, privacy, dedupeKey, factHash, provenanceHash };
-    return Object.freeze({
-      ...semantic,
-      id: semanticId('behavior-event-v1', { dedupeKey, factHash }),
-      contentHash: hashCanonical(semantic),
-    });
+  const sourceFor = () => ({
+    kind: 'fixture' as const,
+    fixtureId: result.fixture.fixtureId,
+    adapterId: result.fixture.adapterId,
+    adapterVersion: result.fixture.adapterVersion,
+  });
+  return result.accepted.map((input) => materializeBehaviorEvent(input, sourceFor()));
+}
+
+export function materializeJsonImportBehaviorEvents(
+  inputs: readonly FixtureEventInput[],
+  identity: JsonImportInputIdentity,
+): readonly BehaviorEvent[] {
+  return inputs.map((input) => materializeBehaviorEvent(input, {
+    kind: 'json-import',
+    importBatchId: identity.importBatchId,
+    sourceItemKey: input.sourceItemKey,
+    adapterId: 'ndjson-import',
+    adapterVersion: '1.0.0',
+  }));
+}
+
+function materializeBehaviorEvent(input: FixtureEventInput, source: BehaviorEvent['source']): BehaviorEvent {
+  const dedupeKey = hashCanonical({ source, sourceItemKey: input.sourceItemKey });
+  const factHash = hashCanonical({
+    occurredAt: input.occurredAt,
+    kind: input.kind,
+    subject: input.subject,
+    attributes: input.attributes,
+  });
+  const privacy = {
+    classification: 'local-sensitive' as const,
+    policyVersion: 'allowlist-v1' as const,
+    redactionCount: 0,
+  };
+  const provenanceHash = hashCanonical({ dedupeKey, factHash, source, privacy });
+  const semantic = { schemaVersion: '1.0.0' as const, ...input, source, privacy, dedupeKey, factHash, provenanceHash };
+  return Object.freeze({
+    ...semantic,
+    id: semanticId('behavior-event-v1', { dedupeKey, factHash }),
+    contentHash: hashCanonical(semantic),
   });
 }
 

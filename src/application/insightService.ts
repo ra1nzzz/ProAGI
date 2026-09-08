@@ -11,9 +11,10 @@ export interface ImportCommit {
   readonly output: InsightLoopOutput;
   readonly acceptedCount: number;
   readonly rejectedCount: number;
-  readonly source?: 'bundled-synthetic-fixture' | 'readonly-test-results';
+  readonly source?: 'bundled-synthetic-fixture' | 'readonly-test-results' | 'json-import';
   readonly consentId?: string;
   readonly sourceItemKey?: string;
+  readonly importBatchId?: string;
   readonly diagnostics?: readonly { readonly code: string; readonly count: number }[];
 }
 

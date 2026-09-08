@@ -1,5 +1,5 @@
 import { hashCanonical, sha256 } from '../domain/canonical';
-import type { Hash } from '../domain/types';
+import type { Hash, JsonImportInputIdentity } from '../domain/types';
 import type { RuntimeStoragePort } from '../application/storagePort';
 import type { ProjectionChangePage, ProjectionStoragePort } from '../application/projectionPort';
 import type { ChangeRecord } from '../application/storageContracts';
@@ -769,7 +769,7 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     });
   }
 
-  async createImportSession(streamId: string, sessionId: string = crypto.randomUUID()): Promise<ImportSessionRecord> {
+  async createImportSession(streamId: string, sessionId: string = crypto.randomUUID(), inputIdentity?: JsonImportInputIdentity): Promise<ImportSessionRecord> {
     return this.withRootMutation(async () => {
     const db = await this.database();
     const tx = this.mutationTransaction(db, ['meta', 'system'], 'readwrite');
@@ -782,6 +782,7 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
         recordType: 'import_session' as const,
         writtenAt: new Date().toISOString(),
         streamId,
+        ...(inputIdentity ? { inputIdentity } : {}),
         state: 'RECEIVING' as const,
         baseCursor: meta.cursor,
         privacyEpoch: meta.privacyEpoch,
@@ -816,7 +817,11 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
       if (!session || !['RECEIVING', 'VALIDATED', 'COMMITTING'].includes(session.state)) throw new M1bError('ERR_IMPORT_SESSION_STATE');
        assertCanonicalHash(session, 'ERR_IMPORT_SESSION_HASH_INVALID');
       if (session.privacyEpoch !== meta.privacyEpoch || meta.observationMode !== 'ACTIVE' || meta.recoveryMode !== 'NORMAL') throw new M1bError('ERR_PRIVACY_EPOCH_STALE');
-      assertStoredRecordCollection(snapshotRecords, 'ERR_RECORD_HASH_INVALID');
+       if (session.committedBatchHashes.includes(batchHash)) {
+         await done;
+         return session;
+       }
+       assertStoredRecordCollection(snapshotRecords, 'ERR_RECORD_HASH_INVALID');
        if (!/^sha256:[0-9a-f]{64}$/.test(batchHash)) throw new M1bError('ERR_BATCH_HASH_MISMATCH');
        let delta = 0;
       for (const record of snapshotRecords) {

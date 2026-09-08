@@ -81,12 +81,15 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const [purgeCommitVersion, setPurgeCommitVersion] = useState(0);
   const [readonlyConsent, setReadonlyConsent] = useState<ReadonlyConsentSnapshot | null>(null);
   const [readonlyFile, setReadonlyFile] = useState<File | null>(null);
+  const [ndjsonFile, setNdjsonFile] = useState<File | null>(null);
   const [readonlyConsentOpen, setReadonlyConsentOpen] = useState(false);
   const [readonlyBusy, setReadonlyBusy] = useState(false);
+  const [ndjsonBusy, setNdjsonBusy] = useState(false);
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [eventTtlDays, setEventTtlDays] = useState(7);
   const [derivedTtlDays, setDerivedTtlDays] = useState(30);
   const readonlyFileRef = useRef<HTMLInputElement>(null);
+  const ndjsonFileRef = useRef<HTMLInputElement>(null);
   const projectionStoreRef = useRef<IndexedDbM1bAdapter | null>(null);
   const projectionRef = useRef<MarkdownProjectionAdapter | null>(null);
   const projectionRequestRef = useRef(0);
@@ -141,6 +144,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setReplaySnapshot(null);
       setPreviewToken(null);
       setPreviewBusy(false);
+      setNdjsonBusy(false);
+      setNdjsonFile(null);
       setDeletionBusy(false);
       setDeleteConfirmOpen(false);
       setDomainStatus(detail?.external === false
@@ -163,12 +168,14 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
         setCanonicalPrivate(detail.observationMode === 'PRIVATE');
         if (detail.observationMode === 'PRIVATE') disposeProjection();
       }
-       if (detail.runtimeFaulted !== undefined) setRuntimeFaulted(detail.runtimeFaulted);
+      if (detail.runtimeFaulted !== undefined) setRuntimeFaulted(detail.runtimeFaulted);
       if (detail.purge) {
         disposeProjection();
         setReplaySnapshot(null);
         setPreviewToken(null);
         setPreviewBusy(false);
+        setNdjsonBusy(false);
+        setNdjsonFile(null);
         setDeletionBusy(false);
         setDeleteConfirmOpen(false);
         setOrbState('IDLE');
@@ -185,9 +192,10 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       uiEpochRef.current += 1;
       disposeProjection();
       setRuntimeFaulted(true);
-       setRecovery(detail.code.includes('PURGE') ? 'blocked' : 'recovery');
+      setRecovery(detail.code.includes('PURGE') ? 'blocked' : 'recovery');
       setOrbState('ERROR');
       setPreviewBusy(false);
+      setNdjsonBusy(false);
       setDeletionBusy(false);
       setDomainStatus('本地运行时需要安全恢复；普通写入已暂停。');
       setAnnouncement(`本地运行时报告 ${detail.code}（${detail.operation}），请重试恢复。`);
@@ -595,6 +603,37 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     event.target.value = '';
   };
 
+  const chooseNdjsonFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setNdjsonFile(event.target.files?.[0] ?? null);
+    event.target.value = '';
+  };
+
+  const previewNdjsonFile = async () => {
+    const file = ndjsonFile;
+    const epoch = uiEpochRef.current;
+    if (!file || !runtimeRef.current) return;
+    if (runtimeFaulted) { setDomainStatus('本地运行时需要先完成安全恢复；普通写入保持暂停。'); return; }
+    if (privateMode) { setDomainStatus('隐私模式中未导入；请先恢复观察。'); return; }
+    setNdjsonBusy(true);
+    try {
+      const preview = await runtimeRef.current.previewNdjson(file.stream());
+      if (epoch !== uiEpochRef.current) return;
+      setPreviewToken(preview.token);
+      setNdjsonFile(null);
+      setOrbState('SUGGESTION');
+      setDomainStatus(`本地 NDJSON 预览已准备：${preview.acceptedCount} 条事件、${preview.episodeCount} 个 Episode、${preview.insightCount} 条 Insight；尚未提交。`);
+      setAnnouncement('本地 NDJSON 已完成 Worker 与 Application 双重校验，请明确确认后提交。');
+    } catch {
+      if (epoch !== uiEpochRef.current) return;
+      await syncRuntimeFault(epoch);
+      if (epoch !== uiEpochRef.current) return;
+      setOrbState('ERROR');
+      setDomainStatus('本地 NDJSON 未启用（输入或 Worker 校验失败）；canonical store 未显示成功。');
+    } finally {
+      if (epoch === uiEpochRef.current) setNdjsonBusy(false);
+    }
+  };
+
   const authorizeReadonlyFile = async () => {
     const file = readonlyFile;
     const epoch = uiEpochRef.current + 1;
@@ -723,8 +762,10 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setOrbState(committed.output.claims.length ? 'SUGGESTION' : 'LEARNING');
       setDomainStatus(committed.source === 'readonly-test-results'
         ? `真实只读来源已持久提交 ${committed.acceptedCount} 条事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`
-        : `本地样例已持久提交 ${committed.acceptedCount} 条测试事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`);
-      setAnnouncement(`${committed.source === 'readonly-test-results' ? '真实只读来源' : '本地样例'}已由 IndexedDB PreviewGuard 原子提交。`);
+        : committed.source === 'json-import'
+          ? `本地 NDJSON 已通过 ImportSession 原子发布 ${committed.acceptedCount} 条事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`
+          : `本地样例已持久提交 ${committed.acceptedCount} 条测试事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`);
+      setAnnouncement(`${committed.source === 'readonly-test-results' ? '真实只读来源' : committed.source === 'json-import' ? '本地 NDJSON' : '本地样例'}已完成原子提交。`);
     } catch {
       if (epoch !== uiEpochRef.current) return;
       await syncRuntimeFault(epoch);
@@ -849,7 +890,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
             <div>
               <p className="eyebrow">全局状态与隐私</p>
               <h1 id="privacy-title">{privateMode ? '隐私模式已开启' : '仅处理本地测试事件'}</h1>
-            <p id="coarse-source">来源：{readonlyConsent?.grant && !readonlyConsent.revoked ? '用户授权的真实只读测试结果' : '测试事件'} · Shadow-only</p>
+              <p id="coarse-source">来源：{readonlyConsent?.grant && !readonlyConsent.revoked ? '用户授权的真实只读测试结果' : imported?.source === 'json-import' ? '用户选择的本地 NDJSON' : '测试事件'} · Shadow-only</p>
             </div>
           </div>
           <div className="privacy-strip__actions">
@@ -869,6 +910,11 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               选择真实只读 JSON
               <input ref={readonlyFileRef} data-testid="readonly-file" type="file" accept="application/json,.json" onChange={chooseReadonlyFile} hidden />
             </label>
+            <label className="button button--quiet">
+              选择本地 NDJSON
+              <input ref={ndjsonFileRef} data-testid="ndjson-file" type="file" accept="application/x-ndjson,.ndjson" onChange={chooseNdjsonFile} hidden />
+            </label>
+            {ndjsonFile ? <button type="button" className="button button--quiet" onClick={() => void previewNdjsonFile()} disabled={runtimeFaulted || privateMode || ndjsonBusy || Boolean(imported) || Boolean(previewToken)}>{ndjsonBusy ? '校验中…' : '预览 NDJSON'}</button> : null}
             {readonlyConsent?.grant && !readonlyConsent.revoked ? <>
               <button type="button" className="button button--quiet" onClick={() => void revokeReadonly()} disabled={readonlyBusy}>撤回真实来源授权</button>
               <button type="button" className="button button--quiet" onClick={() => void expireReadonly()} disabled={readonlyBusy}>清理到期数据</button>

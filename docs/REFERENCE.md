@@ -41,7 +41,7 @@
 
 ## 来源快照与冲突裁决
 
-- 当前实现基线：M2 pilot evidence runner、TRACE 与 readonly revoke 竞态修复已提交于 commit `def3be9`（`def3be9` 的 tree 为 `049e459e41935f35d194c34fb97e7bcb4cb95111`）；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变实现边界。
+- 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复与授权边界展示已提交于 commit `b1b490e`（其 tree 为 `4622db37c51adc1f872d82994f1f6c6c2bd57190`）；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变实现边界。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。
 - `AGENTS.md` 是交接速记，不与 ROADMAP/COMPLETED/REFERENCE 竞争；它只回链本知识库。

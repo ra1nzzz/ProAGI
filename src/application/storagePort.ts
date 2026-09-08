@@ -42,6 +42,11 @@ export interface RuntimeStoragePort {
     readonly bytes: Uint8Array;
     readonly privacyEpoch: number;
     readonly expiresAt: string;
+    readonly consentId?: string;
+    readonly purpose?: string;
+    readonly policyVersion?: string;
+    readonly retentionPolicyId?: string;
+    readonly allowedFieldsHash?: Hash;
   }): Promise<{ readonly token: string; readonly guard: PreviewCommitGuardRecord }>;
   bindPreviewBatch(token: string, batchHash: Hash): Promise<PreviewCommitGuardRecord>;
   commitPreview(token: string, callerId: string, batch: AtomicMutationBatch, legacyNow?: string, simulateResponseLoss?: boolean): Promise<CommitResult>;
@@ -62,4 +67,5 @@ export interface RuntimeStoragePort {
   renewRecoveryLease(ownerClientId: string, fencingToken: string, now?: number): Promise<RecoveryLeaseRecord>;
   stealRecoveryLease(ownerClientId: string, now?: number): Promise<RecoveryLeaseRecord>;
   clearAll(options?: { readonly simulateBlocked?: boolean; readonly cachesCleared?: boolean; readonly deleteTimeoutMs?: number; readonly quiescenceTimeoutMs?: number }): Promise<ClearAllResult>;
+  revokeConsent(consentId: string, revocation: StoredRecord, expectedCursor: Cursor, expectedPrivacyEpoch: number, idempotencyKey: string): Promise<CommitResult>;
 }

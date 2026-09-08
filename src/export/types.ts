@@ -32,7 +32,7 @@ export interface CanonicalObservationEventContent {
   readonly dedupeKey: Hash;
   readonly privacy: {
     readonly classification: 'local-sensitive';
-    readonly policyVersion: 'allowlist-v1';
+    readonly policyVersion: string;
     readonly redactionCount: number;
   };
 }

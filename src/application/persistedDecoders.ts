@@ -40,11 +40,12 @@ const behaviorEventSchema: z.ZodType<BehaviorEvent> = z.object({
     testOutcome: z.enum(['passed', 'failed', 'skipped']).optional(),
     durationMs: z.number().int().min(0).max(86_400_000).optional(),
   }).strict(),
-  source: z.object({
-    kind: z.literal('fixture'), fixtureId: safeString, adapterId: safeString, adapterVersion: safeString,
-  }).strict(),
+  source: z.union([
+    z.object({ kind: z.literal('fixture'), fixtureId: safeString, adapterId: safeString, adapterVersion: safeString }).strict(),
+    z.object({ kind: z.literal('readonly-adapter'), sourceItemKey: safeString, adapterId: safeString, adapterVersion: safeString, consentId: safeString, policyVersion: safeString, purpose: safeString }).strict(),
+  ]),
   privacy: z.object({
-    classification: z.literal('local-sensitive'), policyVersion: z.literal('allowlist-v1'), redactionCount: z.number().int().min(0),
+    classification: z.literal('local-sensitive'), policyVersion: safeString, redactionCount: z.number().int().min(0),
   }).strict(),
   dedupeKey: hash,
   factHash: hash,

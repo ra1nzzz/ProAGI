@@ -58,7 +58,12 @@ export interface ObservationPreviewDTO {
   readonly acceptedCount: number;
   readonly episodeCount: number;
   readonly insightCount: number;
-  readonly source: 'bundled-synthetic-fixture';
+  readonly source: 'bundled-synthetic-fixture' | 'readonly-test-results';
+  readonly inputHash?: string;
+  readonly consentId?: string;
+  readonly expiresAt?: string;
+  readonly rejected?: readonly { readonly itemKey: string; readonly code: string; readonly fieldPath: string }[];
+  readonly diagnostics?: readonly { readonly code: string; readonly count: number; readonly itemKeys: readonly string[] }[];
 }
 
 export interface ObservationPort {
@@ -73,6 +78,7 @@ export interface CorrectionPort {
 export interface ControlPort {
   pausePrivacy(): Promise<{ readonly privacyEpoch: number }>;
   resumePrivacy(): Promise<{ readonly privacyEpoch: number }>;
+  revokeConsent(consentId?: string): Promise<void>;
   clear(): Promise<void>;
   recover(): Promise<void>;
   evaluateReplay(): Promise<ReplaySnapshotV1>;

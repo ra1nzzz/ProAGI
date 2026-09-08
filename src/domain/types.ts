@@ -46,10 +46,18 @@ export interface BehaviorEvent extends FixtureEventInput {
     readonly fixtureId: string;
     readonly adapterId: string;
     readonly adapterVersion: string;
+  } | {
+    readonly kind: 'readonly-adapter';
+    readonly sourceItemKey: string;
+    readonly adapterId: string;
+    readonly adapterVersion: string;
+    readonly consentId: string;
+    readonly policyVersion: string;
+    readonly purpose: string;
   };
   readonly privacy: {
     readonly classification: 'local-sensitive';
-    readonly policyVersion: 'allowlist-v1';
+    readonly policyVersion: string;
     readonly redactionCount: number;
   };
   readonly dedupeKey: Hash;

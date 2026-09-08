@@ -48,6 +48,10 @@ export interface StoredRecord<T = unknown> {
   readonly recordType: string;
   readonly writtenAt: string;
   readonly payload: T;
+  readonly retentionClass?: 'event' | 'derived';
+  readonly retentionPolicyId?: string;
+  readonly consentId?: string;
+  readonly expiresAt?: string;
   readonly contentHash: Hash;
 }
 
@@ -102,6 +106,11 @@ export interface PreviewCommitGuardRecord {
   readonly expiresAt: string;
   readonly state: 'READY' | 'CONSUMED';
   readonly idempotencyKey: string;
+  readonly consentId?: string;
+  readonly purpose?: string;
+  readonly policyVersion?: string;
+  readonly retentionPolicyId?: string;
+  readonly allowedFieldsHash?: Hash;
   readonly batchHash?: Hash;
   readonly receiptId?: string;
   readonly contentHash: Hash;
@@ -231,8 +240,8 @@ export function makeBatch(input: Omit<AtomicMutationBatch, 'batchHash'>): Atomic
   };
 }
 
-export function toStoredRecord<T>(recordId: string, recordType: string, payload: T, writtenAt = new Date().toISOString()): StoredRecord<T> {
-  const base = { recordId, recordType, writtenAt, payload };
+export function toStoredRecord<T>(recordId: string, recordType: string, payload: T, writtenAt = new Date().toISOString(), metadata: Pick<StoredRecord, 'retentionClass' | 'retentionPolicyId' | 'consentId' | 'expiresAt'> = {}): StoredRecord<T> {
+  const base = { recordId, recordType, writtenAt, payload, ...metadata };
   return { ...base, contentHash: hashCanonical(base) };
 }
 

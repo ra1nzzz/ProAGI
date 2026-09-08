@@ -469,6 +469,56 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     }
   }
 
+  async revokeConsent(consentId: string, revocation: StoredRecord, expectedCursor: Cursor, expectedPrivacyEpoch: number, idempotencyKey: string): Promise<CommitResult> {
+    const releaseMutation = this.beginInProcessRootMutation();
+    try {
+      const db = await this.database();
+      const tx = this.mutationTransaction(db, ['meta', 'ledger', 'system'], 'readwrite');
+      const done = transactionDone(tx);
+      try {
+        const ledgerStore = tx.objectStore('ledger');
+        const batchHash = hashCanonical({ kind: 'consent-revocation', consentId, revocation: revocation.contentHash });
+        const prior = await requestValue<CommitLedgerRecord | undefined>(ledgerStore.get(idempotencyKey));
+        if (prior) {
+          if (prior.batchHash !== batchHash) throw new M1bError('ERR_IDEMPOTENCY_CONFLICT');
+          await done;
+          return { cursor: prior.committedCursor, applied: false, ledger: prior };
+        }
+        const metaStore = tx.objectStore('meta');
+        const system = tx.objectStore('system');
+        const meta = await requestValue<StoreMetaRecord>(metaStore.get('canonical'));
+        assertMeta(meta, expectedCursor, expectedPrivacyEpoch, false);
+        const grant = await requestValue<StoredRecord<{ id?: unknown; source?: unknown }>>(system.get(`consent-grant:${consentId}`));
+        if (!grant || grant.recordType !== 'consent_grant_v1' || grant.payload?.id !== consentId) throw new M1bError('ERR_CONSENT_NOT_FOUND');
+        assertCanonicalHash(grant, 'ERR_CONSENT_INVALID');
+        if (revocation.recordType !== 'consent_revocation_v1' || revocation.recordId !== `consent-revocation:${consentId}`) throw new M1bError('ERR_CONSENT_INVALID');
+        assertCanonicalHash(revocation, 'ERR_CONSENT_INVALID');
+        const revocationPayload = revocation.payload as { consentId?: unknown; privacyEpochAfter?: unknown };
+        if (revocationPayload.consentId !== consentId || revocationPayload.privacyEpochAfter !== meta.privacyEpoch + 1) throw new M1bError('ERR_CONSENT_INVALID');
+        const existing = await requestValue<StoredRecord<{ consentId?: unknown }>[] >(system.getAll());
+        const alreadyRevoked = existing.find((record) => record.recordType === 'consent_revocation_v1' && record.payload?.consentId === consentId);
+        if (alreadyRevoked) throw new M1bError('ERR_CONSENT_REVOKED');
+        const nextCursor = incrementCursor(meta.cursor);
+        const ledger: CommitLedgerRecord = {
+          idempotencyKey, batchHash, committedCursor: nextCursor,
+          affectedRefs: [{ recordType: 'store_meta', recordId: 'canonical' }, { recordType: revocation.recordType, recordId: revocation.recordId }],
+          committedAt: new Date(this.clock()).toISOString(),
+        };
+        system.add(revocation);
+        metaStore.put({ ...meta, cursor: nextCursor, privacyEpoch: meta.privacyEpoch + 1 });
+        ledgerStore.add(ledger);
+        await done;
+        return { cursor: nextCursor, applied: true, ledger };
+      } catch (error) {
+        safeAbort(tx);
+        await done.catch(() => undefined);
+        throw normalizeIdbError(error);
+      }
+    } finally {
+      releaseMutation();
+    }
+  }
+
   async stagePreview(input: {
     token?: string;
     callerId: string;
@@ -477,10 +527,16 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     bytes: Uint8Array;
     privacyEpoch: number;
     expiresAt: string;
+    consentId?: string;
+    purpose?: string;
+    policyVersion?: string;
+    retentionPolicyId?: string;
+    allowedFieldsHash?: Hash;
   }): Promise<{ token: string; guard: PreviewCommitGuardRecord }> {
     return this.withRootMutation(async () => {
     const bytes = input.bytes.slice();
-    const { callerId, idempotencyKey, inputHash, privacyEpoch, expiresAt, token: suppliedToken } = input;
+    const { callerId, idempotencyKey, inputHash, privacyEpoch, expiresAt, token: suppliedToken,
+      consentId, purpose, policyVersion, retentionPolicyId, allowedFieldsHash } = input;
     if (bytes.byteLength > 262_144) throw new M1bError('ERR_CHUNK_LIMIT');
     const now = this.clock();
     if (inputHash !== sha256(new TextDecoder().decode(bytes))) throw new M1bError('ERR_PREVIEW_INPUT_MISMATCH');
@@ -503,6 +559,11 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
       inputHash: inputHash,
       privacyEpoch: privacyEpoch,
       callerId: callerId,
+      ...(consentId ? { consentId } : {}),
+      ...(purpose ? { purpose } : {}),
+      ...(policyVersion ? { policyVersion } : {}),
+      ...(retentionPolicyId ? { retentionPolicyId } : {}),
+      ...(allowedFieldsHash ? { allowedFieldsHash } : {}),
       expiresAt: expiresAt,
       state: 'READY' as const,
       idempotencyKey: idempotencyKey,
@@ -513,6 +574,7 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     try {
       const meta = await requestValue<StoreMetaRecord>(tx.objectStore('meta').get('canonical'));
       assertMeta(meta, meta.cursor, privacyEpoch, true);
+      if (consentId) await assertActiveReadonlyConsent(tx, guard);
       assertNoPurgedPreviewReference(bytes, meta);
       const system = tx.objectStore('system');
       const existing = await requestValue<Record<string, unknown>[]>(system.getAll());
@@ -1583,6 +1645,7 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
         if (Date.parse(guard.expiresAt) <= this.clock()) throw new M1bError('ERR_PREVIEW_EXPIRED');
         if (!buffer) throw new M1bError('ERR_PREVIEW_BUFFER_MISSING');
         if (buffer.bufferHandleHash !== guard.bufferHandleHash || hashBytes(buffer.bytes) !== guard.bufferHandleHash) throw new M1bError('ERR_PREVIEW_STALE');
+        if (guard.consentId) await assertActiveReadonlyConsent(tx, guard);
       }
       const nextCursor = incrementCursor(meta.cursor);
       const affectedRefs: { recordType: string; recordId: string }[] = [];
@@ -1784,6 +1847,24 @@ function assertMutationControlBoundary(mutation: CanonicalMutation): void {
   const reservedTypes = new Set(['client_registration', 'recovery_lease', 'purge_ack', 'preview_commit_guard', 'observation_commit_receipt', 'deletion_verification_receipt', 'tombstone', 'import_session', 'import_staging']);
   const reservedPrefixes = ['client:', 'recovery-lease', 'purge-ack:', 'preview-guard:', 'preview-receipt:', 'verification:', 'tombstone:', 'import-session:', 'import-stage:'];
   if (reservedTypes.has(recordType) || reservedPrefixes.some((prefix) => recordId.startsWith(prefix))) throw new M1bError('ERR_RESERVED_CONTROL_KEY');
+}
+
+async function assertActiveReadonlyConsent(tx: IDBTransaction, guard: PreviewCommitGuardRecord): Promise<void> {
+  if (!guard.consentId) return;
+  const records = await requestValue<StoredRecord<Record<string, unknown>>[]>(tx.objectStore('system').getAll());
+  const grant = records.find((record) => record.recordType === 'consent_grant_v1' && record.recordId === `consent-grant:${guard.consentId}`);
+  if (!grant) throw new M1bError('ERR_CONSENT_INVALID');
+  assertCanonicalHash(grant, 'ERR_CONSENT_INVALID');
+  const payload = grant.payload;
+  const revoked = records.some((record) => record.recordType === 'consent_revocation_v1' && record.payload?.consentId === guard.consentId);
+  if (revoked || payload.id !== guard.consentId || payload.purpose !== guard.purpose || payload.policyVersion !== guard.policyVersion
+    || payload.retentionPolicyId !== guard.retentionPolicyId || (guard.allowedFieldsHash && hashCanonical(payload.allowedFields) !== guard.allowedFieldsHash)) {
+    throw new M1bError('ERR_CONSENT_STALE');
+  }
+  const policy = records.find((record) => record.recordType === 'retention_policy_v1' && record.recordId === `retention-policy:${payload.retentionPolicyId}`);
+  if (!policy) throw new M1bError('ERR_RETENTION_POLICY_MISSING');
+  assertCanonicalHash(policy, 'ERR_CONSENT_INVALID');
+  if (policy.payload?.sourceKind !== 'readonly-adapter' || !Number.isInteger(policy.payload?.eventTtlDays) || Number(policy.payload.eventTtlDays) < 1 || Number(policy.payload.eventTtlDays) > 7 || !Number.isInteger(policy.payload?.derivedTtlDays) || Number(policy.payload.derivedTtlDays) < 1 || Number(policy.payload.derivedTtlDays) > 30) throw new M1bError('ERR_RETENTION_POLICY_INVALID');
 }
 
 function assertNoPurgedReference(mutation: CanonicalMutation, meta: StoreMetaRecord): void {

@@ -59,6 +59,10 @@ export interface StoredRecord<T = unknown> {
   recordType: string;
   writtenAt: string;
   payload: T;
+  retentionClass?: 'event' | 'derived';
+  retentionPolicyId?: string;
+  consentId?: string;
+  expiresAt?: string;
   contentHash: Hash;
 }
 
@@ -122,6 +126,11 @@ export interface PreviewCommitGuardRecord {
   expiresAt: string;
   state: 'READY' | 'CONSUMED';
   idempotencyKey: string;
+  consentId?: string;
+  purpose?: string;
+  policyVersion?: string;
+  retentionPolicyId?: string;
+  allowedFieldsHash?: Hash;
   batchHash?: Hash;
   receiptId?: string;
   contentHash: Hash;

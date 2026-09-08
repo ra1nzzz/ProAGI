@@ -1,7 +1,10 @@
 import { makeBatch, toStoredRecord, CommitResponseLostError } from './storageContracts';
 import type { AtomicMutationBatch, StoredRecord } from './storageContracts';
-import { sha256 } from '../domain/canonical';
-import type { CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import { hashCanonical, sha256 } from '../domain/canonical';
+import type { BehaviorEvent, CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import { runInsightLoop } from '../domain/insightLoop';
+import { ReadonlyTestResultsAdapter } from '../adapters/readonlyTestResults';
+import { makeConsentGrant, makeConsentRevocation, makeRetentionPolicy, type ConsentGrant, type ConsentRevocation, type ReadonlyConsentSnapshot, type RetentionPolicy } from './m2Consent';
 import { developerDayFixtureJson } from '../fixtures/developerDay';
 import type { CorrectionResult } from './knowledge';
 import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTIME_SNAPSHOT_EVENT, type ControlPort, type CorrectionPort, type ExternalPurgeNotification, type InsightServicePort, type ObservationPort, type ObservationPreviewDTO, type PurgeCommittedNotification, type RuntimeErrorNotification, type RuntimeNotificationPort, type RuntimeSnapshotNotification } from './ports';
@@ -14,6 +17,7 @@ const PURGE_CLIENT_WAIT_MS = 15_000;
 const PURGE_CLIENT_LEASE_MS = 6_000;
 const CACHE_CLEAR_TIMEOUT_MS = 10_000;
 const PURGE_UI_TIMEOUT_MS = 2_000;
+const READONLY_PREVIEW_TTL_MS = 5 * 60_000;
 
 export interface BrowserRuntimeScheduler {
   readonly setTimeout: typeof setTimeout;
@@ -106,6 +110,7 @@ export interface BrowserRuntimeSnapshot {
   readonly privacyEpoch: number;
   readonly imported: ImportCommit | null;
   readonly runtimeFaulted: boolean;
+  readonly readonlyConsent: ReadonlyConsentSnapshot | null;
 }
 
 export interface BrowserRuntimeTestHooks {
@@ -134,6 +139,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private readonly clientId: string;
   private readonly purgeChannel: BroadcastChannel | null;
   private readonly serviceFactory: () => InsightServicePort;
+  private readonly readonlyAdapter = new ReadonlyTestResultsAdapter();
   private readonly notificationPort: RuntimeNotificationPort;
   private readonly clock: () => number;
   private readonly scheduler: BrowserRuntimeScheduler;
@@ -174,6 +180,8 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private rootRegistered = false;
   private unregisterRuntimeRoot!: () => void;
   private readonly testHooks: BrowserRuntimeTestHooks;
+  private readonlyConsent: ReadonlyConsentSnapshot | null = null;
+  private readonlyConsentLoaded = false;
   private readonly purgeMessageHandler = (event: MessageEvent<unknown>) => {
     const data = decodePurgeChannelMessage(event.data);
     if (!data) {
@@ -465,6 +473,155 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   currentClaim(): WorkModelClaim | null {
     const claimKey = this.imported?.output.claims[0]?.claimKey;
     return claimKey ? (this.service.currentClaim(claimKey) ?? null) : null;
+  }
+
+  async getReadonlyConsent(): Promise<ReadonlyConsentSnapshot | null> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      return this.loadReadonlyConsent();
+    }, true);
+  }
+
+  async revokeConsent(consentId?: string): Promise<void> {
+    return this.revokeReadonlyConsent(consentId);
+  }
+
+  async grantReadonlyConsent(input: { readonly sourceItemKey: string; readonly eventTtlDays?: number; readonly derivedTtlDays?: number }): Promise<ReadonlyConsentSnapshot> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      if (!/^[\p{L}\p{N}._-]{1,80}$/u.test(input.sourceItemKey)) throw new Error('ERR_SOURCE_ID_INVALID');
+      const existing = await this.loadReadonlyConsent();
+      if (existing && !existing.revoked) throw new Error('ERR_CONSENT_ALREADY_ACTIVE');
+      const meta = await this.adapter.getMeta();
+      if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
+      const now = readM2Clock(this.clock);
+      const policy = makeRetentionPolicy(crypto.randomUUID(), input.eventTtlDays, input.derivedTtlDays);
+      const grant = makeConsentGrant({
+        id: crypto.randomUUID(), sourceItemKey: input.sourceItemKey, adapterId: this.readonlyAdapter.id,
+        adapterVersion: this.readonlyAdapter.version, retentionPolicyId: policy.id, grantedAt: new Date(now).toISOString(),
+      });
+      const policyRecord = toStoredRecord(`retention-policy:${policy.id}`, 'retention_policy_v1', policy);
+      const grantRecord = toStoredRecord(`consent-grant:${grant.id}`, 'consent_grant_v1', grant);
+      const batch = makeBatch({
+        idempotencyKey: grant.id, expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch,
+        requiresActiveObservation: true, storeNames: ['system'],
+        mutations: [
+          { kind: 'insertImmutable' as const, storeName: 'system' as const, record: policyRecord },
+          { kind: 'insertImmutable' as const, storeName: 'system' as const, record: grantRecord },
+        ],
+      });
+      await this.adapter.commit(batch);
+      const snapshot = { grant, policy, revoked: false } as const;
+      this.readonlyConsent = snapshot;
+      return snapshot;
+    });
+  }
+
+  async previewReadonly(input: { readonly utf8: string; readonly sourceItemKey?: string }): Promise<ObservationPreviewDTO> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      const consent = await this.loadReadonlyConsent();
+      if (!consent || consent.revoked) throw new Error('ERR_CONSENT_STALE');
+      if (input.sourceItemKey !== undefined && input.sourceItemKey !== consent.grant.source.sourceItemKey) throw new Error('ERR_CONSENT_SCOPE');
+      if (this.imported || this.pendingPreview) throw new Error('ERR_PREVIEW_ALREADY_EXISTS');
+      const now = readM2Clock(this.clock);
+      const meta = await this.adapter.getMeta();
+      if (meta.observationMode !== 'ACTIVE') throw new Error('ERR_PRIVACY_MODE');
+      const parsed = this.readonlyAdapter.preview(input.utf8, {
+        sourceItemKey: consent.grant.source.sourceItemKey, consentId: consent.grant.id, purpose: consent.grant.purpose,
+        policyVersion: consent.grant.policyVersion, projectKey: 'readonly', capturedAt: new Date(now).toISOString(),
+      });
+      if (parsed.events.length === 0) throw new Error('ERR_NO_ACCEPTED_EVENTS');
+      const candidate = this.serviceFactory();
+      const commit = buildReadonlyImport(candidate, parsed.events, parsed.parsed, consent.grant);
+      const idempotencyKey = crypto.randomUUID();
+      const expiresAt = new Date(now + READONLY_PREVIEW_TTL_MS).toISOString();
+      const staged = await this.adapter.stagePreview({
+        callerId: 'proagi-web', idempotencyKey, inputHash: parsed.inputHash, bytes: new TextEncoder().encode(input.utf8),
+        privacyEpoch: meta.privacyEpoch, expiresAt, consentId: consent.grant.id,
+        purpose: consent.grant.purpose, policyVersion: consent.grant.policyVersion, retentionPolicyId: consent.grant.retentionPolicyId,
+        allowedFieldsHash: hashCanonical(consent.grant.allowedFields),
+      });
+      const records = recordsForCommit(commit, now, { consentId: consent.grant.id, retentionPolicyId: consent.grant.retentionPolicyId, eventTtlDays: consent.policy.eventTtlDays, derivedTtlDays: consent.policy.derivedTtlDays });
+      const batch = makeBatch({
+        idempotencyKey, expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch,
+        requiresActiveObservation: true, requiresPreview: true, storeNames: ['business'],
+        mutations: records.map((record) => ({ kind: 'insertImmutable' as const, storeName: 'business' as const, record })),
+      });
+      try {
+        await this.adapter.bindPreviewBatch(staged.token, batch.batchHash);
+        this.pendingPreview = { candidate, commit, token: staged.token, batch, createdAt: now };
+        return {
+          token: staged.token, acceptedCount: parsed.parsed.accepted.length, episodeCount: commit.output.episodes.length,
+          insightCount: commit.output.claims.length, source: 'readonly-test-results', inputHash: parsed.inputHash,
+          consentId: consent.grant.id, expiresAt, rejected: parsed.parsed.rejected, diagnostics: parsed.parsed.diagnostics,
+        };
+      } catch (error) {
+        await this.bestEffort('readonly-preview-cancel', () => this.adapter.cancelPreview(staged.token));
+        throw error;
+      }
+    });
+  }
+
+  async revokeReadonlyConsent(consentId?: string): Promise<void> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      const snapshot = await this.loadReadonlyConsent();
+      const id = consentId ?? snapshot?.grant.id;
+      if (!snapshot || !id || snapshot.grant.id !== id) throw new Error('ERR_CONSENT_NOT_FOUND');
+      if (snapshot.revoked) return;
+      const pending = this.pendingPreview;
+      this.pendingPreview = null;
+      if (pending) await this.bestEffort('revoke-preview-cancel', () => this.adapter.cancelPreview(pending.token));
+      const meta = await this.adapter.getMeta();
+      const revocation = makeConsentRevocation({ id: crypto.randomUUID(), consentId: id, revokedAt: new Date(readM2Clock(this.clock)).toISOString(), reason: 'user', privacyEpochAfter: meta.privacyEpoch + 1 });
+      const record = toStoredRecord(`consent-revocation:${id}`, 'consent_revocation_v1', revocation);
+      await this.adapter.revokeConsent(id, record, meta.cursor, meta.privacyEpoch, revocation.id);
+      this.readonlyConsent = { ...snapshot, revoked: true, revocation };
+      await this.deleteReadonlyConsentLineage(id);
+      await this.hydrate();
+      this.notifyRuntimeSnapshot(true);
+    });
+  }
+
+  async expireReadonlyRetention(now?: number): Promise<number> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      const effectiveNow = now ?? readM2Clock(this.clock);
+      if (!Number.isFinite(effectiveNow)) throw new Error('ERR_CLOCK_UNAVAILABLE');
+      const records = await this.adapter.scanPublishedBusiness();
+      const expired = records.filter((record) => record.retentionClass === 'event' && record.expiresAt !== undefined && Date.parse(record.expiresAt) <= effectiveNow
+        && isReadonlyEventRecord(record) && typeof (record.payload as { source?: { consentId?: unknown } }).source?.consentId === 'string');
+      const consentIds = [...new Set(expired.map((record) => String((record.payload as { source: { consentId: string } }).source.consentId)))];
+      for (const id of consentIds) await this.deleteReadonlyConsentLineage(id);
+      return expired.length;
+    });
+  }
+
+  private async loadReadonlyConsent(): Promise<ReadonlyConsentSnapshot | null> {
+    const records = await this.adapter.getAll<StoredRecord<Record<string, unknown>>>('system');
+    const grantRecord = records.filter((record) => record.recordType === 'consent_grant_v1').at(-1);
+    if (!grantRecord) {
+      this.readonlyConsent = null;
+      this.readonlyConsentLoaded = true;
+      return null;
+    }
+    assertConsentRecord(grantRecord);
+    const grant = grantRecord.payload as unknown as ConsentGrant;
+    const policyRecord = records.find((record) => record.recordType === 'retention_policy_v1' && record.recordId === `retention-policy:${grant.retentionPolicyId}`);
+    if (!policyRecord) throw new Error('ERR_RETENTION_POLICY_MISSING');
+    assertConsentRecord(policyRecord);
+    const policy = policyRecord.payload as unknown as RetentionPolicy;
+    const revocationRecord = records.find((record) => record.recordType === 'consent_revocation_v1' && record.payload?.consentId === grant.id);
+    const revocation = revocationRecord ? (assertConsentRecord(revocationRecord), revocationRecord.payload as unknown as ConsentRevocation) : undefined;
+    const snapshot = { grant, policy, revoked: Boolean(revocation), ...(revocation ? { revocation } : {}) };
+    this.readonlyConsent = snapshot;
+    this.readonlyConsentLoaded = true;
+    return snapshot;
   }
 
   async preview(): Promise<ObservationPreviewDTO> {
@@ -815,6 +972,70 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.lastDurableCursor = verifiedMeta.cursor;
   }
 
+  private async deleteReadonlyConsentLineage(consentId: string, cause: 'consent-revoked' | 'retention-expired' = 'consent-revoked'): Promise<void> {
+    const records = await this.adapter.scanPublishedBusiness();
+    const sourceRecords = records.filter((record) => isReadonlyEventRecord(record)
+      && (record.payload as { source: { consentId?: unknown } }).source.consentId === consentId);
+    const target = sourceRecords[0];
+    if (!target) return;
+    const anchors = expandLineageAnchors(records, sourceRecords);
+    const plan = await this.adapter.planDeletion({
+      storeName: 'business', recordId: target.recordId, contentHash: target.contentHash, recordType: target.recordType,
+      lineageAnchorDigests: anchors.map((anchor) => sha256(anchor)),
+    }, cause);
+    const ownerClientId = crypto.randomUUID();
+    const fenced = await this.adapter.fenceDeletion(plan, ownerClientId, this.clock());
+    let journal = fenced.journal;
+    while (journal.state === 'FENCED') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      journal = await this.adapter.enumerateDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
+    }
+    while (journal.state === 'DELETING') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      journal = await this.adapter.deleteChunk(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
+    }
+    this.imported = null;
+    this.pendingPreview = null;
+    this.service = this.serviceFactory();
+    await this.awaitUiPurgeCommit(journal.id, journal.purge.generation, 'owner');
+    if (journal.state === 'PURGE_PENDING') {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+      await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, this.clock());
+      if (!this.purgeChannel && journal.purge.requiredClientIds.some((clientId) => clientId !== this.clientId)) throw new Error('ERR_PURGE_CLIENTS_PENDING');
+      await new Promise((resolve) => this.scheduler.setTimeout(resolve, 100));
+    }
+    let audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
+    const waitStarted = this.clock();
+    let purgeRetried = false;
+    while (audit.outcome === 'CLIENTS_PENDING' && this.clock() < waitStarted + PURGE_CLIENT_WAIT_MS) {
+      const now = this.clock();
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, now);
+      if (!purgeRetried && now - waitStarted >= PURGE_CLIENT_LEASE_MS) {
+        journal = await this.adapter.retryPurge(journal.id, ownerClientId, fenced.lease.fencingToken, [this.clientId], now);
+        purgeRetried = true;
+        this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+        if (journal.purge.requiredClientIds.includes(this.clientId)) await this.adapter.acknowledgePurge(journal.id, journal.purge.generation, this.clientId, now);
+      } else this.purgeChannel?.postMessage({ type: 'PURGE_REQUEST', deletionId: journal.id, generation: journal.purge.generation, clientId: this.clientId });
+      await new Promise((resolve) => this.scheduler.setTimeout(resolve, 250));
+      audit = await this.adapter.sealAndAudit(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
+    }
+    if (audit.outcome !== 'CLEAN') throw new Error(audit.outcome === 'CLIENTS_PENDING' ? 'ERR_PURGE_CLIENTS_PENDING' : 'ERR_DELETE_REACHABLE_READONLY');
+    let finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
+    while (!finalizing.finalizing.complete) {
+      await this.adapter.renewRecoveryLease(ownerClientId, fenced.lease.fencingToken, this.clock());
+      finalizing = await this.adapter.finalizeDeletionPage(journal.id, ownerClientId, fenced.lease.fencingToken, 128, this.clock());
+    }
+    try {
+      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock(), this.testHooks.simulateDeletionResponseLoss?.() === true);
+    } catch (error) {
+      if (!(error instanceof CommitResponseLostError)) throw error;
+      await this.adapter.verifyDeletion(journal.id, ownerClientId, fenced.lease.fencingToken, this.clock());
+    }
+    await this.hydrate(0, this.operationGeneration);
+    this.lastDurableCursor = (await this.adapter.getMeta()).cursor;
+  }
+
   private async collectClaimLineageAnchors(claimKey: string): Promise<readonly string[]> {
     const business = await this.adapter.scanPublishedBusiness();
     const heads = await this.adapter.getAll<StoredRecord>('heads');
@@ -924,7 +1145,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
 
   private async readSnapshot(): Promise<BrowserRuntimeSnapshot> {
     const meta = await this.adapter.getMeta();
-    return { observationMode: meta.observationMode, cursor: meta.cursor, privacyEpoch: meta.privacyEpoch, imported: this.imported, runtimeFaulted: this.runtimeFaulted };
+    return { observationMode: meta.observationMode, cursor: meta.cursor, privacyEpoch: meta.privacyEpoch, imported: this.imported, runtimeFaulted: this.runtimeFaulted, readonlyConsent: this.readonlyConsentLoaded ? this.readonlyConsent : null };
   }
 
   private withRuntimeOperation<T>(operation: () => Promise<T>, allowFaulted = false): Promise<T> {
@@ -1022,6 +1243,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const marker = markerRecord ? decodeFixtureMarker(markerRecord.payload) : undefined;
     const service = this.serviceFactory();
     service.restoreEvents(events);
+    const snapshot: KnowledgeSnapshot = { claims, heads, versions, corrections, deletedClaimKeys: [] };
     let imported: ImportCommit | null = null;
     if (marker) {
       const asOf = marker.asOf;
@@ -1029,15 +1251,24 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const receipt = await service.commit(preview.token, `hydrate:${markerRecord!.contentHash}`, asOf);
       const hasStoredClaim = claims.length > 0;
       const base = receipt.result.output.claims[0];
-      const snapshot: KnowledgeSnapshot = {
+      const fixtureSnapshot: KnowledgeSnapshot = {
         claims,
         heads,
         versions,
         corrections,
         deletedClaimKeys: !hasStoredClaim && base ? [base.claimKey] : [],
       };
-      service.hydrateKnowledge(snapshot);
+      service.hydrateKnowledge(fixtureSnapshot);
       imported = !hasStoredClaim && base ? withoutClaim(receipt.result, base) : receipt.result;
+    } else if (events.length > 0) {
+      service.hydrateKnowledge(snapshot);
+      const output = runInsightLoop(events, { asOf: latestEventAt(events), timezone: 'UTC', knowledge: snapshot });
+      imported = Object.freeze({
+        events, output, acceptedCount: events.length, rejectedCount: 0,
+        ...(events[0]?.source.kind === 'readonly-adapter' ? {
+          source: 'readonly-test-results' as const, consentId: events[0].source.consentId, sourceItemKey: events[0].source.sourceItemKey,
+        } : {}),
+      });
     }
     if (generation !== this.operationGeneration) return;
     const { meta: stableMeta, journals } = await this.adapter.readPurgeFence();
@@ -1065,7 +1296,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   }
 }
 
-function recordsForCommit(commit: ImportCommit, asOf: number): StoredRecord[] {
+interface RetentionMetadata {
+  readonly consentId: string;
+  readonly retentionPolicyId: string;
+  readonly eventTtlDays: number;
+  readonly derivedTtlDays: number;
+}
+
+function recordsForCommit(commit: ImportCommit, asOf: number, retention?: RetentionMetadata): StoredRecord[] {
   const writtenAt = new Date(asOf).toISOString();
   const output = commit.output;
   const entities: Array<{ id: string; type: string; payload: unknown }> = [
@@ -1076,14 +1314,58 @@ function recordsForCommit(commit: ImportCommit, asOf: number): StoredRecord[] {
     ...output.skillCandidates.map((payload) => ({ id: payload.id, type: 'skill_candidate_v1', payload })),
     ...output.actionIntents.map((payload) => ({ id: payload.id, type: 'action_intent_v1', payload })),
     { id: output.report.id, type: 'daily_report_snapshot_v1', payload: output.report },
-    { id: FIXTURE_MARKER_ID, type: 'fixture_commit_v1', payload: { asOf, fixtureId: 'developer-day-bundled-v1' } satisfies FixtureMarker },
+    ...(!retention ? [{ id: FIXTURE_MARKER_ID, type: 'fixture_commit_v1', payload: { asOf, fixtureId: 'developer-day-bundled-v1' } satisfies FixtureMarker }] : []),
   ];
-  return entities.map((entity) => toStoredRecord(entity.id, entity.type, entity.payload, writtenAt));
+  const eventExpiresAt = retention ? new Date(asOf + retention.eventTtlDays * 86_400_000).toISOString() : undefined;
+  const derivedExpiresAt = retention ? new Date(asOf + retention.derivedTtlDays * 86_400_000).toISOString() : undefined;
+  return entities.map((entity) => toStoredRecord(entity.id, entity.type, entity.payload, writtenAt, retention ? {
+    retentionClass: entity.type === 'behavior_event_v1' ? 'event' : 'derived',
+    retentionPolicyId: retention.retentionPolicyId,
+    consentId: retention.consentId,
+    expiresAt: entity.type === 'behavior_event_v1' ? eventExpiresAt : derivedExpiresAt,
+  } : {}));
+}
+
+function buildReadonlyImport(
+  service: InsightServicePort,
+  events: readonly BehaviorEvent[],
+  parsed: { readonly capturedAt: string; readonly timezone: string; readonly accepted: readonly unknown[]; readonly rejected: readonly unknown[]; readonly diagnostics: readonly { readonly code: string; readonly count: number }[]; readonly sourceItemKey: string },
+  grant: ConsentGrant,
+): ImportCommit {
+  const knowledge = service.knowledgeSnapshot();
+  service.restoreEvents(events);
+  const output = runInsightLoop(events, { asOf: latestEventAt(events), timezone: parsed.timezone, knowledge });
+  service.hydrateKnowledge({ ...knowledge, claims: [...knowledge.claims, ...output.claims.filter((claim) => !knowledge.claims.some((known) => known.id === claim.id))] });
+  return Object.freeze({
+    events, output, acceptedCount: parsed.accepted.length, rejectedCount: parsed.rejected.length,
+    source: 'readonly-test-results' as const, consentId: grant.id, sourceItemKey: parsed.sourceItemKey,
+    diagnostics: parsed.diagnostics.map((item) => ({ code: item.code, count: item.count })),
+  });
+}
+
+function latestEventAt(events: readonly BehaviorEvent[]): string {
+  return events.reduce((latest, event) => event.occurredAt > latest ? event.occurredAt : latest, '1970-01-01T00:00:00.000Z');
+}
+
+function readM2Clock(clock: () => number): number {
+  const now = clock();
+  if (!Number.isFinite(now)) throw new Error('ERR_CLOCK_UNAVAILABLE');
+  return now;
+}
+
+function isReadonlyEventRecord(record: StoredRecord): boolean {
+  return record.recordType === 'behavior_event_v1' && Boolean(record.payload && typeof record.payload === 'object'
+    && 'source' in record.payload && (record.payload as { source?: { kind?: unknown } }).source?.kind === 'readonly-adapter');
+}
+
+function assertConsentRecord(record: StoredRecord): void {
+  const { contentHash, ...base } = record;
+  if (contentHash === undefined || hashCanonical(base) !== contentHash) throw new Error('ERR_CONSENT_INVALID');
 }
 
 const LINEAGE_IDENTITY_FIELDS = [
   'id', 'contentHash', 'commandId', 'baseRevisionId', 'resultClaimRevisionId', 'parentRevisionId',
-  'versionId', 'basedOnVersionId', 'causedByCorrectionId',
+  'versionId', 'basedOnVersionId', 'causedByCorrectionId', 'actionIntentRevisionId',
 ] as const;
 
 function runtimeErrorCode(error: unknown): string {
@@ -1129,6 +1411,20 @@ const RUNTIME_ERROR_DISPOSITION: Readonly<Record<string, RuntimeErrorDisposition
   ERR_QUOTA_LOGICAL: 'expected',
   ERR_CHUNK_LIMIT: 'expected',
   ERR_BATCH_LIMIT: 'expected',
+  ERR_SOURCE_ID_INVALID: 'expected',
+  ERR_CONSENT_NOT_FOUND: 'expected',
+  ERR_CONSENT_INVALID: 'expected',
+  ERR_CONSENT_STALE: 'expected',
+  ERR_CONSENT_SCOPE: 'expected',
+  ERR_CONSENT_ALREADY_ACTIVE: 'expected',
+  ERR_CLOCK_UNAVAILABLE: 'fault',
+  ERR_CONSENT_REVOKED: 'expected',
+  ERR_RETENTION_RANGE: 'expected',
+  ERR_RETENTION_POLICY_MISSING: 'expected',
+  ERR_RETENTION_POLICY_INVALID: 'expected',
+  ERR_NO_ACCEPTED_EVENTS: 'expected',
+  ERR_PREVIEW_ALREADY_EXISTS: 'expected',
+  ERR_DELETE_REACHABLE_READONLY: 'fault',
 });
 
 function isBenignRuntimeError(error: unknown): boolean {
@@ -1149,6 +1445,29 @@ function identityAnchors(record: StoredRecord): string[] {
     if (typeof payload[field] === 'string') anchors.push(payload[field]);
   }
   return anchors;
+}
+
+function expandLineageAnchors(records: readonly StoredRecord[], roots: readonly StoredRecord[]): readonly string[] {
+  const anchors = new Set(roots.flatMap(identityAnchors));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const record of records) {
+      if (!containsAnyRawAnchor(record, anchors)) continue;
+      for (const anchor of identityAnchors(record)) {
+        if (!anchors.has(anchor)) { anchors.add(anchor); changed = true; }
+      }
+    }
+  }
+  return [...anchors].sort();
+}
+
+function containsAnyRawAnchor(value: unknown, anchors: ReadonlySet<string>, depth = 0): boolean {
+  if (depth > 256) throw new Error('ERR_MUTATION_DEPTH');
+  if (typeof value === 'string') return anchors.has(value);
+  if (Array.isArray(value)) return value.some((item) => containsAnyRawAnchor(item, anchors, depth + 1));
+  if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>).some((item) => containsAnyRawAnchor(item, anchors, depth + 1));
+  return false;
 }
 
 function withoutClaim(commit: ImportCommit, claim: WorkModelClaim, lineageAnchors: readonly string[] = [claim.id]): ImportCommit {

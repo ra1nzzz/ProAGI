@@ -6,6 +6,8 @@ import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTI
 import type { ImportCommit } from '../application/insightService';
 import type { CorrectionAction } from '../domain/types';
 import type { ReplaySnapshotV1 } from '../domain/replay';
+import type { ReadonlyConsentSnapshot } from '../application/m2Consent';
+import { sha256 } from '../domain/canonical';
 import { ORB_STATES, ORB_STATE_LABELS, type ContentMode, type OrbState } from './demoViewModel';
 import { buildInsightPresentation } from './presentation';
 import { Orb, type OrbProfile } from './Orb';
@@ -61,6 +63,14 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const [domainRevision, setDomainRevision] = useState(0);
   const purgeCommitCallbacksRef = useRef<PurgeCommittedNotification[]>([]);
   const [purgeCommitVersion, setPurgeCommitVersion] = useState(0);
+  const [readonlyConsent, setReadonlyConsent] = useState<ReadonlyConsentSnapshot | null>(null);
+  const [readonlyFile, setReadonlyFile] = useState<File | null>(null);
+  const [readonlyConsentOpen, setReadonlyConsentOpen] = useState(false);
+  const [readonlyBusy, setReadonlyBusy] = useState(false);
+  const [riskAccepted, setRiskAccepted] = useState(false);
+  const [eventTtlDays, setEventTtlDays] = useState(7);
+  const [derivedTtlDays, setDerivedTtlDays] = useState(30);
+  const readonlyFileRef = useRef<HTMLInputElement>(null);
 
   const privateMode = canonicalPrivate;
 
@@ -172,9 +182,15 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     runtimeRef.current = runtime;
     setRuntimeReady(true);
     const epoch = uiEpochRef.current;
+    const consentLoadTimer = window.setTimeout(() => {
+      void runtime.getReadonlyConsent().then((consent) => {
+        if (active && epoch === uiEpochRef.current) setReadonlyConsent(consent);
+      }).catch(() => undefined);
+    }, 250);
     void runtime.start().then((snapshot) => {
       if (!active || epoch !== uiEpochRef.current) return;
       setImported(snapshot.imported);
+      setReadonlyConsent(snapshot.readonlyConsent);
       setReplaySnapshot(null);
       setCanonicalPrivate(snapshot.observationMode === 'PRIVATE');
       setRuntimeFaulted(snapshot.runtimeFaulted);
@@ -194,6 +210,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     });
     return () => {
       active = false;
+      window.clearTimeout(consentLoadTimer);
       uiEpochRef.current += 1;
       if (runtimeRef.current === runtime) runtimeRef.current = null;
        void runtime.close();
@@ -326,6 +343,63 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     setAnnouncement('恢复演示已结束。尚未连接真实存储。');
   };
 
+  const chooseReadonlyFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+      setReadonlyFile(file);
+    if (file) { setRiskAccepted(false); setReadonlyConsentOpen(true); }
+    event.target.value = '';
+  };
+
+  const authorizeReadonlyFile = async () => {
+    const file = readonlyFile;
+    const epoch = uiEpochRef.current;
+    if (!file || !runtimeRef.current) return;
+    if (!riskAccepted) { setDomainStatus('请先明确接受 local-first 剩余风险。'); return; }
+    setReadonlyBusy(true);
+    try {
+      const sourceItemKey = `readonly-${sha256(`${file.name}|${file.size}|${file.lastModified}`).slice(7, 23)}`;
+      const consent = await runtimeRef.current.grantReadonlyConsent({ sourceItemKey, eventTtlDays, derivedTtlDays });
+      const preview = await runtimeRef.current.previewReadonly({ utf8: await file.text(), sourceItemKey });
+      if (epoch !== uiEpochRef.current) return;
+      setReadonlyConsent(consent);
+      setPreviewToken(preview.token);
+      setReadonlyConsentOpen(false);
+      setOrbState('SUGGESTION');
+      setDomainStatus(`真实只读来源预览已准备：${preview.acceptedCount} 条事件、${preview.episodeCount} 个 Episode、${preview.insightCount} 条 Insight；尚未提交。`);
+      setAnnouncement('真实只读来源已授权并完成导入前预览。');
+    } catch (error) {
+      if (epoch !== uiEpochRef.current) return;
+      setDomainStatus(`真实只读来源未启用（${safeErrorCode(error)}）；canonical store 未显示成功。`);
+    } finally {
+      if (epoch === uiEpochRef.current) setReadonlyBusy(false);
+    }
+  };
+
+  const revokeReadonly = async () => {
+    const epoch = uiEpochRef.current;
+    try {
+      await runtimeRef.current?.revokeConsent();
+      if (epoch !== uiEpochRef.current) return;
+      setReadonlyConsent(null);
+      setReadonlyFile(null);
+      setImported(null);
+      setPreviewToken(null);
+      setDomainStatus('真实来源授权已撤回，相关事件与派生 lineage 已按删除协议清除。');
+      setAnnouncement('真实来源授权已撤回。');
+    } catch (error) {
+      if (epoch === uiEpochRef.current) setDomainStatus(`撤回失败（${safeErrorCode(error)}）；未显示成功。`);
+    }
+  };
+
+  const expireReadonly = async () => {
+    try {
+      const count = await runtimeRef.current?.expireReadonlyRetention();
+      setDomainStatus(`保留期清理完成：发现 ${count ?? 0} 条到期真实只读事件。`);
+    } catch (error) {
+      setDomainStatus(`保留期清理失败（${safeErrorCode(error)}）；未显示成功。`);
+    }
+  };
+
   const runBundledFixture = async () => {
     const epoch = uiEpochRef.current;
     if (runtimeFaulted) {
@@ -372,8 +446,10 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       setPreviewToken(null);
       setDomainRevision((value) => value + 1);
       setOrbState(committed.output.claims.length ? 'SUGGESTION' : 'LEARNING');
-      setDomainStatus(`已持久提交 ${committed.acceptedCount} 条测试事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`);
-      setAnnouncement('本地样例已由 IndexedDB PreviewGuard 原子提交。');
+      setDomainStatus(committed.source === 'readonly-test-results'
+        ? `真实只读来源已持久提交 ${committed.acceptedCount} 条事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`
+        : `本地样例已持久提交 ${committed.acceptedCount} 条测试事件，生成 ${committed.output.episodes.length} 个 Episode 与 ${committed.output.claims.length} 条 Insight。`);
+      setAnnouncement(`${committed.source === 'readonly-test-results' ? '真实只读来源' : '本地样例'}已由 IndexedDB PreviewGuard 原子提交。`);
     } catch {
       if (epoch !== uiEpochRef.current) return;
       await syncRuntimeFault(epoch);
@@ -484,7 +560,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
           <p className="brand-bar__kicker">PERSONAL INSIGHT SYSTEM</p>
           <p className="brand-bar__name">ProAGI <span>Assistant</span></p>
         </div>
-        <p className="brand-bar__boundary">Fixture 研究原型 · Shadow-only</p>
+        <p className="brand-bar__boundary">Fixture 研究原型</p>
       </header>
 
       <nav aria-label="主要导航" className="sr-only"><a href="#main-content">洞察主界面</a></nav>
@@ -495,7 +571,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
             <div>
               <p className="eyebrow">全局状态与隐私</p>
               <h1 id="privacy-title">{privateMode ? '隐私模式已开启' : '仅处理本地测试事件'}</h1>
-              <p id="coarse-source">来源：测试事件 · 未连接真实桌面</p>
+            <p id="coarse-source">来源：{readonlyConsent?.grant && !readonlyConsent.revoked ? '用户授权的真实只读测试结果' : '测试事件'} · Shadow-only</p>
             </div>
           </div>
           <div className="privacy-strip__actions">
@@ -511,8 +587,36 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
             <button type="button" className="button button--quiet" onClick={(event) => startRecovery(event.currentTarget, 'recovery')}>
               查看安全模式
             </button>
+            <label className="button button--quiet">
+              选择真实只读 JSON
+              <input ref={readonlyFileRef} data-testid="readonly-file" type="file" accept="application/json,.json" onChange={chooseReadonlyFile} hidden />
+            </label>
+            {readonlyConsent?.grant && !readonlyConsent.revoked ? <>
+              <button type="button" className="button button--quiet" onClick={() => void revokeReadonly()} disabled={readonlyBusy}>撤回真实来源授权</button>
+              <button type="button" className="button button--quiet" onClick={() => void expireReadonly()} disabled={readonlyBusy}>清理到期数据</button>
+            </> : null}
           </div>
         </section>
+
+        {readonlyConsentOpen && readonlyFile ? (
+          <section className="stale-banner" role="dialog" aria-modal="true" aria-labelledby="readonly-consent-title">
+            <div>
+              <p className="eyebrow">M2 · 明确授权</p>
+              <h2 id="readonly-consent-title">允许读取这份真实测试结果？</h2>
+              <p>仅保留白名单字段：事件时间、类型、测试结果、耗时和用户提供的来源别名；不会联网、执行动作或保存原始错误正文。</p>
+              <p>默认保留：事件 7 天，派生 Insight 30 天。撤回授权会递增 privacy epoch，并删除该来源的事件与派生 lineage。</p>
+              <div className="button-row" aria-label="保留期设置">
+                <label>事件保留 <select value={eventTtlDays} onChange={(event) => setEventTtlDays(Number(event.target.value))}><option value={1}>1 天</option><option value={3}>3 天</option><option value={7}>7 天</option></select></label>
+                <label>派生保留 <select value={derivedTtlDays} onChange={(event) => setDerivedTtlDays(Number(event.target.value))}><option value={1}>1 天</option><option value={7}>7 天</option><option value={30}>30 天</option></select></label>
+              </div>
+              <label className="checkbox-row"><input type="checkbox" checked={riskAccepted} onChange={(event) => setRiskAccepted(event.target.checked)} /> 我已知悉 local-first 不能防同机用户、恶意扩展、profile 同步/备份或磁盘取证。</label>
+            </div>
+            <div className="segmented-control">
+              <button type="button" className="button button--quiet" onClick={() => { setReadonlyConsentOpen(false); setReadonlyFile(null); }}>取消</button>
+              <button type="button" className="button button--primary" onClick={() => void authorizeReadonlyFile()} disabled={!riskAccepted || readonlyBusy}>{readonlyBusy ? '分析中…' : '授权并预览'}</button>
+            </div>
+          </section>
+        ) : null}
 
         {recovery ? (
           <RecoverySurface

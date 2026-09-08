@@ -278,6 +278,43 @@ test('a second tab privacy epoch fences an older preview commit', async ({ page,
   await secondTab.close();
 });
 
+test('cross-tab deletion releases the peer and preserves unrelated events', async ({ page, context }) => {
+  await page.goto('/');
+  const secondTab = await context.newPage();
+  try {
+    await secondTab.goto('/');
+    await page.getByRole('button', { name: '预览本地样例' }).click();
+    await page.getByRole('button', { name: '确认导入' }).click();
+    await expect(page.locator('.domain-loop__status')).toContainText('已持久提交 4 条测试事件');
+
+    await expect(secondTab.getByRole('button', { name: '删除 Insight' })).toBeEnabled();
+    await expect(secondTab.locator('.domain-loop__status')).toContainText('本地 canonical store 已刷新');
+    const peerBefore = await readStore(secondTab, 'business') as Array<Record<string, unknown>>;
+    expect(peerBefore.some((record) => record.recordType === 'behavior_event_v1')).toBe(true);
+    expect(peerBefore.some((record) => record.recordType === 'work_model_claim_v1')).toBe(true);
+
+    await page.getByRole('button', { name: '删除 Insight' }).click();
+    await page.getByRole('button', { name: '确认删除' }).click();
+    await expect(page.locator('.domain-loop__status')).toContainText('Insight lineage 已从本地 canonical store 删除');
+    await expect(secondTab.locator('.domain-loop__status')).toContainText('其他标签页已完成隐私清除，并经 canonical store 验证');
+    await expect(secondTab.getByRole('button', { name: '接受 Insight' })).toBeDisabled();
+    expect(await readStore(page, 'audit')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.correction', resultCode: 'OK' }) }),
+    ]));
+    await expect.poll(async () => (await readStore(secondTab, 'audit') as Array<Record<string, unknown>>)
+      .map((record) => (record.payload as { eventName?: unknown }).eventName)).toContain('runtime.background');
+
+    const peerAfter = await readStore(secondTab, 'business') as Array<Record<string, unknown>>;
+    expect(peerAfter.some((record) => record.recordType === 'behavior_event_v1')).toBe(true);
+    expect(peerAfter.some((record) => ['work_model_claim_v1', 'knowledge_version_v1', 'correction_record_v1', 'daily_report_snapshot_v1'].includes(String(record.recordType)))).toBe(false);
+    expect(await readStore(secondTab, 'heads')).toEqual([]);
+    expect(await readStore(secondTab, 'journal')).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'deletion_terminal' })]));
+    expect(await readStore(secondTab, 'journal')).not.toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'active_deletion_journal' })]));
+  } finally {
+    await secondTab.close();
+  }
+});
+
 test('operation-scoped response loss reconciles one durable import', async ({ page }) => {
   await installE2eHarness(page);
   await page.goto('/');

@@ -6,7 +6,7 @@
 
 | 事实类型 | 唯一责任方 | 说明 |
 | --- | --- | --- |
-| 北极星目标与长期模块 | [ROADMAP.md](ROADMAP.md) + 用户在 2026-09-08 的明确指示 | ROADMAP 将长期愿景拆成可依赖的阶段和队列。 |
+| 北极星目标与长期模块 | [ROADMAP.md](ROADMAP.md) + 用户在 2026-09-08 的明确指示 | ROADMAP 固化“持续记录电脑使用习惯、识别分析归类工作任务操作、持续自学习自进化、终身陪伴、最终走向 AGI AGENT”的目标，并拆成可依赖的阶段和队列。 |
 | 当前产品合同 | [final/PRD.md](final/PRD.md) | 只规定当前可验证切片，不把北极星当作已交付能力。 |
 | 类型、状态、错误、数据和隐私契约 | [final/SPEC.md](final/SPEC.md) | 实现不得自行扩展兼容语义。 |
 | 架构与边界 | [final/ARCH.md](final/ARCH.md) | canonical store、Ports/Adapters、Shadow-only 和删除边界。 |
@@ -21,6 +21,7 @@
 
 | 模块/功能 | 仓库实现依据 | 研究/开源或平台参考 | 采用内容与明确边界 |
 | --- | --- | --- | --- |
+| 北极星目标拆解：感知→理解→记忆→陪伴→能力/行动→受约束自进化 | [ROADMAP.md](ROADMAP.md)、[PRD](PRD/desktop-agent-complete-prd-v1.1.md)、[deep-research-report.md](research/deep-research-report.md) | 原始桌面 Agent PRD 与本项目深度调研结论 | 用于排列 M1→M5 与 `F-*` 依赖；长期方向不等于当前能力，所有扩大权限的模块仍需独立证据和阶段 Gate。 |
 | 事件优先、低粒度活动记录 | `src/domain/`、M1/M2 schema | [ActivityWatch](https://activitywatch.net/)、[Buckets and events](https://docs.activitywatch.net/en/latest/buckets-and-events.html)、[Security](https://docs.activitywatch.net/en/latest/security.html) | 参考 bucket/event 与本地数据边界；不复制其采集范围，不因此开放全局监听。 |
 | Windows 窄只读感知 | M5 规划、未来 UIA adapter | [Microsoft UI Automation](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-overview) | 参考控件语义访问模型；必须 allowlist、只读、可暂停、可降级，当前尚未实现。 |
 | 许可、隐私和屏幕访问边界 | M2/M5 consent 与 future screenshot fallback | [Recall privacy controls](https://support.microsoft.com/en-us/windows/privacy/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15)、[Apple screen/audio controls](https://support.apple.com/guide/mac-help/control-access-screen-system-audio-recording-mchld6aa7d23/mac) | 参考显式授权、暂停和可控范围；不代表本产品已持续截图或拥有系统权限。 |
@@ -42,7 +43,8 @@
 
 ## 来源快照与冲突裁决
 
-- 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示、retention shortening、M4 action-decision TRACE 入口和预注册 case 校验已提交于 commit `8a6eb08`（其 tree 为 `5753e347077131b968ad9f02f1eaaaa2bb816d64`）；知识库入口初始提交为 `98ecb82`。本次文档修订只更新状态与回链，不改变 live action 仍为 0 的边界。
+- 本次知识库维护的输入快照为 commit `ec5ad146ea4e49b2b85b68d6eb86cf6aa69106a9`、tree `cb73d86e5b02e3eabec1ea7fd6f89eaa746a4e27`；本次只更新 ROADMAP/COMPLETED/REFERENCE 的目标、队列、状态与回链，不改变实现或外部证据状态。
+- 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示、retention shortening、M4 action-decision TRACE 入口和预注册 case 校验已提交于 commit `8a6eb08`（其 tree 为 `5753e347077131b968ad9f02f1eaaaa2bb816d64`）；知识库入口初始提交为 `98ecb82`。live action 仍为 0。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。
 - `AGENTS.md` 是交接速记，不与 ROADMAP/COMPLETED/REFERENCE 竞争；它只回链本知识库。

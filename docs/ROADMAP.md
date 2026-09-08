@@ -6,9 +6,20 @@
 
 ## 北极星目标
 
-一个持续记录用户电脑使用习惯、识别、分析并归类用户在不同时间、不同工作任务中的操作，持续自学习、自进化的终身陪伴性 Agent；最终目标是 AGI Agent。
+一个持续记录用户的电脑使用习惯、识别分析归类不同时间用户在不同的工作任务中的操作，持续自学习、自进化的终身陪伴性AGENT（最终目标是AGI AGENT）。
 
 这是一条长期产品方向，不等于当前版本已经拥有桌面监听、真实执行或 AGI 能力。当前路线必须先用可审计、可撤回、可回放的证据证明每一层能力，再扩大权限和范围。
+
+## 北极星目标拆解
+
+| 能力层 | 目标拆解 | 当前/未来落点 |
+| --- | --- | --- |
+| 感知 | 在明确 consent、字段白名单和保留期内记录用户活动 | 当前是 M2 单一窄只读源；未来是 `F-PERCEPTION`。 |
+| 理解 | 将活动按时间和工作任务组织为 Activity→Episode→Task→Workflow | M1 有确定性最小闭环；未来是 `F-SEGMENTATION`。 |
+| 记忆 | 形成带 provenance、版本、纠正、删除和 Replay 的长期工作模型 | 当前由 M1 Core 与 canonical store 承担；未来是 `F-WORLD-MODEL`。 |
+| 陪伴 | 通过解释、提问、日报和反馈帮助用户纠正并复用经验 | 当前为 Insight/Correction/Replay；未来是 `F-FEEDBACK`。 |
+| 能力与行动 | 先生成可回放、可比较、可撤回的候选能力，再在独立 PRD 批准后执行 | 当前 M3 为隔离 Runtime/Projection，行动保持 Shadow-only；未来是 `F-SKILL`、`F-RUNTIME`、`F-ACTION`。 |
+| 自学习与自进化 | 用评价、版本、隔离、人工批准和回滚让系统持续改进 | 未来是 `F-EVOLUTION`，不把在线自修改或模型权重训练当作当前能力。 |
 
 ## 知识库入口与权威边界
 
@@ -23,12 +34,12 @@
 ## 当前状态
 
 - 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现。
-- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 7/7、全量 fork 单测 161/161、双视口 E2E 32/32、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
+- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 161/161、双视口 E2E 32/32、生产构建与 artifact 检查均通过。外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
 - M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
 
-## 当前队列（只列未完成）
+## 当前/进行中队列（只列未完成）
 
 | 顺序 | ID | 模块/目标 | 状态 | 依赖 | 完成定义与 TRACE 证据 |
 | --- | --- | --- | --- | --- | --- |
@@ -39,7 +50,7 @@
 | 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `PREPARED / NEED_MORE_EVIDENCE / EXTERNAL` | Gate 1–3 证据、真实价值需求 | 见 [M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md)；只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。当前 PRD 仍 Shadow-only。 |
 | 3 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `NOT_STARTED` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
 
-## 未来队列（依赖排序）
+## 未来队列（按依赖排序）
 
 这些是北极星目标的后续生产化模块；M1 中已经存在的最小原型不在此重复计数。
 

@@ -21,6 +21,7 @@ export const TRACE_EVENT_NAMES = Object.freeze([
   'runtime.preview-readonly',
   'runtime.grant-consent',
   'runtime.revoke-consent',
+  'runtime.shorten-retention',
   'runtime.expire-retention',
   'runtime.correction',
   'runtime.privacy',

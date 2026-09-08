@@ -90,4 +90,26 @@ describe('M2 consent and retention', () => {
     await expect(runtime.expireReadonlyRetention()).resolves.toBe(2);
     await expect(adapter.scanPublishedBusiness()).resolves.toHaveLength(0);
   });
+
+  it('shortens retention with a CAS policy update and uses the new TTL for expiry', async () => {
+    const base = Date.parse('2026-01-02T10:00:00Z');
+    let now = base;
+    const clock = () => now;
+    const adapter = new IndexedDbM1bAdapter(`m2-shorten-${crypto.randomUUID()}`, clock);
+    const runtime = createBrowserInsightRuntime({ adapterFactory: () => adapter, channelFactory: () => null, clientIdFactory: () => 'm2-shorten-client', clock });
+    runtimes.push(runtime);
+    await runtime.start();
+    const consent = await runtime.grantReadonlyConsent({ sourceItemKey: 'readonly-source-d' });
+    const preview = await runtime.previewReadonly({ utf8: sourceJson(), sourceItemKey: consent.grant.source.sourceItemKey });
+    await runtime.commit(preview.token);
+
+    const shortened = await runtime.shortenReadonlyRetention({ eventTtlDays: 1, derivedTtlDays: 7 });
+    expect(shortened.policy).toMatchObject({ id: consent.policy.id, eventTtlDays: 1, derivedTtlDays: 7 });
+    await expect(runtime.shortenReadonlyRetention({ eventTtlDays: 2, derivedTtlDays: 7 })).rejects.toMatchObject({ message: 'ERR_RETENTION_EXTENSION_REQUIRES_CONSENT' });
+    now = base + 86_400_000;
+    await expect(runtime.expireReadonlyRetention()).resolves.toBe(2);
+    await expect(adapter.scanPublishedBusiness()).resolves.toHaveLength(0);
+    const trace = await adapter.getAll<{ payload?: { eventName?: string } }>('audit');
+    expect(trace.some((record) => record.payload?.eventName === 'runtime.shorten-retention')).toBe(true);
+  });
 });

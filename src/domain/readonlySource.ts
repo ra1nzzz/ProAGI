@@ -137,6 +137,7 @@ export function parseReadonlyInput(utf8: string, options: ReadonlyInputOptions):
 
 export function materializeReadonlyBehaviorEvents(parsed: ReadonlyParseResult, options: ReadonlyMaterializationOptions): readonly BehaviorEvent[] {
   return parsed.accepted.map((input) => {
+    const { redactionCount, ...candidate } = input;
     const source = {
       kind: 'readonly-adapter' as const,
       sourceItemKey: options.sourceItemKey,
@@ -148,8 +149,8 @@ export function materializeReadonlyBehaviorEvents(parsed: ReadonlyParseResult, o
     };
     const dedupeKey = hashCanonical({ source, sourceItemKey: input.sourceItemKey });
     const factHash = hashCanonical({ occurredAt: input.occurredAt, kind: input.kind, subject: input.subject, attributes: input.attributes });
-    const privacy = { classification: 'local-sensitive' as const, policyVersion: options.policyVersion, redactionCount: input.redactionCount };
-    const semantic = { schemaVersion: '1.0.0' as const, ...input, source, privacy, dedupeKey, factHash, provenanceHash: hashCanonical({ dedupeKey, factHash, source, privacy }) };
+    const privacy = { classification: 'local-sensitive' as const, policyVersion: options.policyVersion, redactionCount };
+    const semantic = { schemaVersion: '1.0.0' as const, ...candidate, source, privacy, dedupeKey, factHash, provenanceHash: hashCanonical({ dedupeKey, factHash, source, privacy }) };
     return Object.freeze({ ...semantic, id: semanticId('behavior-event-v1', { dedupeKey, factHash, consentId: options.consentId }), contentHash: hashCanonical(semantic) });
   });
 }

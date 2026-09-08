@@ -1741,7 +1741,7 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
         if (Date.parse(guard.expiresAt) <= this.clock()) throw new M1bError('ERR_PREVIEW_EXPIRED');
         if (!buffer) throw new M1bError('ERR_PREVIEW_BUFFER_MISSING');
         if (buffer.bufferHandleHash !== guard.bufferHandleHash || hashBytes(buffer.bytes) !== guard.bufferHandleHash) throw new M1bError('ERR_PREVIEW_STALE');
-        if (guard.consentId) await assertActiveReadonlyConsent(tx, guard);
+        if (guard.consentId) await assertActiveReadonlyConsent(tx, guard, batch);
       }
       const nextCursor = incrementCursor(meta.cursor);
       const affectedRefs: { recordType: string; recordId: string }[] = [];
@@ -1945,7 +1945,7 @@ function assertMutationControlBoundary(mutation: CanonicalMutation): void {
   if (reservedTypes.has(recordType) || reservedPrefixes.some((prefix) => recordId.startsWith(prefix))) throw new M1bError('ERR_RESERVED_CONTROL_KEY');
 }
 
-async function assertActiveReadonlyConsent(tx: IDBTransaction, guard: PreviewCommitGuardRecord): Promise<void> {
+async function assertActiveReadonlyConsent(tx: IDBTransaction, guard: PreviewCommitGuardRecord, batch?: AtomicMutationBatch): Promise<void> {
   if (!guard.consentId) return;
   const records = await requestValue<StoredRecord<Record<string, unknown>>[]>(tx.objectStore('system').getAll());
   const grant = records.find((record) => record.recordType === 'consent_grant_v1' && record.recordId === `consent-grant:${guard.consentId}`);
@@ -1961,6 +1961,16 @@ async function assertActiveReadonlyConsent(tx: IDBTransaction, guard: PreviewCom
   if (!policy) throw new M1bError('ERR_RETENTION_POLICY_MISSING');
   assertCanonicalHash(policy, 'ERR_CONSENT_INVALID');
   if (policy.payload?.sourceKind !== 'readonly-adapter' || !Number.isInteger(policy.payload?.eventTtlDays) || Number(policy.payload.eventTtlDays) < 1 || Number(policy.payload.eventTtlDays) > 7 || !Number.isInteger(policy.payload?.derivedTtlDays) || Number(policy.payload.derivedTtlDays) < 1 || Number(policy.payload.derivedTtlDays) > 30) throw new M1bError('ERR_RETENTION_POLICY_INVALID');
+  if (batch) {
+    const businessMutations = batch.mutations.filter((mutation): mutation is CanonicalMutation & { kind: 'insertImmutable'; storeName: 'business' } => mutation.kind === 'insertImmutable' && mutation.storeName === 'business');
+    if (businessMutations.length === 0 || businessMutations.some(({ record }) => {
+      if (record.consentId !== guard.consentId || record.retentionPolicyId !== payload.retentionPolicyId || !record.expiresAt) return true;
+      const writtenAt = Date.parse(record.writtenAt);
+      const expiresAt = Date.parse(record.expiresAt);
+      const ttlDays = record.retentionClass === 'event' ? Number(policy.payload.eventTtlDays) : record.retentionClass === 'derived' ? Number(policy.payload.derivedTtlDays) : Number.NaN;
+      return !Number.isFinite(writtenAt) || !Number.isFinite(expiresAt) || !Number.isFinite(ttlDays) || expiresAt !== writtenAt + ttlDays * 86_400_000;
+    })) throw new M1bError('ERR_CONSENT_STALE');
+  }
 }
 
 function assertNoPurgedReference(mutation: CanonicalMutation, meta: StoreMetaRecord): void {

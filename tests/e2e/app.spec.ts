@@ -151,6 +151,12 @@ test('runs the consent-bound readonly flow and records its pilot evidence state'
   expect(committed.filter((record) => record.recordType === 'behavior_event_v1')).toHaveLength(2);
   expect(committed.every((record) => typeof record.consentId === 'string' && typeof record.retentionPolicyId === 'string')).toBe(true);
 
+  await consentDetails.getByLabel('事件保留（当前）').selectOption('1');
+  await consentDetails.getByLabel('派生保留（当前）').selectOption('7');
+  await consentDetails.getByRole('button', { name: '应用缩短保留期' }).click();
+  await expect(page.locator('.domain-loop__status')).toContainText('保留期已缩短：事件 1 天、派生 7 天');
+  await expect(consentDetails).toContainText('事件 1 天 · 派生 7 天');
+
   await page.getByRole('button', { name: '撤回真实来源授权' }).click();
   await expect(page.locator('.domain-loop__status')).toContainText('真实来源授权已撤回');
   expect(await readStore(page, 'business')).toEqual([]);
@@ -164,6 +170,7 @@ test('runs the consent-bound readonly flow and records its pilot evidence state'
   await traceDialog.getByLabel('结果').selectOption('NOT_RUN');
   await traceDialog.getByRole('button', { name: '写入 TRACE' }).click();
   const trace = (await readStore(page, 'audit')) as Array<Record<string, unknown>>;
+  expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'runtime.shorten-retention' }) })]));
   expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ recordType: 'trace_event_v1', payload: expect.objectContaining({ eventName: 'manual.check', manualCheck: expect.objectContaining({ caseId: 'M2.pilot', result: 'NOT_RUN' }) }) })]));
 });
 

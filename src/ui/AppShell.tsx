@@ -647,6 +647,32 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     }
   };
 
+  const shortenReadonly = async () => {
+    const consent = readonlyConsent;
+    if (!consent || consent.revoked || !runtimeRef.current) return;
+    const selectedEventTtlDays = Math.min(eventTtlDays, consent.policy.eventTtlDays);
+    const selectedDerivedTtlDays = Math.min(derivedTtlDays, consent.policy.derivedTtlDays);
+    if (selectedEventTtlDays === consent.policy.eventTtlDays && selectedDerivedTtlDays === consent.policy.derivedTtlDays) {
+      setDomainStatus('当前已是所选的最短保留期。');
+      return;
+    }
+    setPreviewToken(null);
+    setReadonlyBusy(true);
+    try {
+      const updated = await runtimeRef.current.shortenReadonlyRetention({ eventTtlDays: selectedEventTtlDays, derivedTtlDays: selectedDerivedTtlDays });
+      setReadonlyConsent(updated);
+      setEventTtlDays(updated.policy.eventTtlDays);
+      setDerivedTtlDays(updated.policy.derivedTtlDays);
+      invalidateProjection();
+      setDomainStatus(`保留期已缩短：事件 ${updated.policy.eventTtlDays} 天、派生 ${updated.policy.derivedTtlDays} 天；旧预览已失效。`);
+      setAnnouncement('保留期已缩短并写入本地策略。');
+    } catch (error) {
+      setDomainStatus(`保留期缩短失败（${safeErrorCode(error)}）；未显示成功。`);
+    } finally {
+      setReadonlyBusy(false);
+    }
+  };
+
   const runBundledFixture = async () => {
     const epoch = uiEpochRef.current;
     if (runtimeFaulted) {
@@ -858,6 +884,15 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               <div><dt>用途</dt><dd>{readonlyConsent.grant.purpose}</dd></div>
               <div><dt>保留策略</dt><dd>事件 {readonlyConsent.policy.eventTtlDays} 天 · 派生 {readonlyConsent.policy.derivedTtlDays} 天</dd></div>
             </dl>
+            <div className="button-row" aria-label="缩短当前保留期">
+              <label>事件保留 <select aria-label="事件保留（当前）" value={Math.min(eventTtlDays, readonlyConsent.policy.eventTtlDays)} onChange={(event) => setEventTtlDays(Number(event.target.value))}>
+                {[1, 3, 7].filter((days) => days <= readonlyConsent.policy.eventTtlDays).map((days) => <option key={days} value={days}>{days} 天</option>)}
+              </select></label>
+              <label>派生保留 <select aria-label="派生保留（当前）" value={Math.min(derivedTtlDays, readonlyConsent.policy.derivedTtlDays)} onChange={(event) => setDerivedTtlDays(Number(event.target.value))}>
+                {[1, 7, 30].filter((days) => days <= readonlyConsent.policy.derivedTtlDays).map((days) => <option key={days} value={days}>{days} 天</option>)}
+              </select></label>
+              <button type="button" className="button button--quiet" onClick={() => void shortenReadonly()} disabled={readonlyBusy}>应用缩短保留期</button>
+            </div>
             <p className="consent-details__fields">字段白名单<code>{readonlyConsent.grant.allowedFields.join(' · ')}</code></p>
             <p className="consent-details__notice">当前来源只读、Shadow-only；不联网、不注入输入、不自动写入外部文件。撤回授权会删除该来源的事件与派生 lineage。</p>
           </details>

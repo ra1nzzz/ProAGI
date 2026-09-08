@@ -497,6 +497,44 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.revokeReadonlyConsent(consentId);
   }
 
+  async shortenReadonlyRetention(input: { readonly eventTtlDays: number; readonly derivedTtlDays: number }): Promise<ReadonlyConsentSnapshot> {
+    return this.withRuntimeOperation(async () => {
+      await this.start();
+      await this.enforcePurgeFence();
+      const snapshot = await this.loadReadonlyConsent();
+      if (!snapshot || snapshot.revoked) throw new Error('ERR_CONSENT_STALE');
+      const now = readM2Clock(this.clock);
+      if (input.eventTtlDays > snapshot.policy.eventTtlDays || input.derivedTtlDays > snapshot.policy.derivedTtlDays) {
+        throw new Error('ERR_RETENTION_EXTENSION_REQUIRES_CONSENT');
+      }
+      const policy = makeRetentionPolicy(snapshot.policy.id, input.eventTtlDays, input.derivedTtlDays);
+      if (policy.eventTtlDays === snapshot.policy.eventTtlDays && policy.derivedTtlDays === snapshot.policy.derivedTtlDays) return snapshot;
+      const policyRecordId = `retention-policy:${snapshot.grant.retentionPolicyId}`;
+      const currentPolicyRecord = await this.adapter.getRecord<StoredRecord>('system', policyRecordId);
+      if (!currentPolicyRecord || currentPolicyRecord.recordType !== 'retention_policy_v1') throw new Error('ERR_RETENTION_POLICY_MISSING');
+      assertConsentRecord(currentPolicyRecord);
+      const pending = this.pendingPreview;
+      this.pendingPreview = null;
+      if (pending) await this.bestEffort('retention-preview-cancel', () => this.adapter.cancelPreview(pending.token));
+      const meta = await this.adapter.getMeta();
+      const nextPolicyRecord = toStoredRecord(policyRecordId, 'retention_policy_v1', policy, new Date(now).toISOString());
+      const batch = makeBatch({
+        idempotencyKey: crypto.randomUUID(), expectedCursor: meta.cursor, expectedPrivacyEpoch: meta.privacyEpoch,
+        storeNames: ['system'], mutations: [{ kind: 'casSingleton' as const, storeName: 'system' as const, record: nextPolicyRecord, expectedContentHash: currentPolicyRecord.contentHash }],
+      });
+      await this.adapter.commit(batch);
+      this.pendingTraceExport = null;
+      this.readonlyConsent = { ...snapshot, policy };
+      await this.expireReadonlyRetentionInternal(now);
+      this.purgeChannel?.postMessage({ type: 'STATE_CHANGED', clientId: this.clientId });
+      const durableMeta = await this.adapter.getMeta();
+      this.lastDurableCursor = durableMeta.cursor;
+      this.lastStorageIncarnation = durableMeta.incarnation ?? null;
+      this.notifyRuntimeSnapshot(false, durableMeta.observationMode);
+      return this.readonlyConsent;
+    }, false, 'runtime.shorten-retention');
+  }
+
   async grantReadonlyConsent(input: { readonly sourceItemKey: string; readonly eventTtlDays?: number; readonly derivedTtlDays?: number }): Promise<ReadonlyConsentSnapshot> {
     return this.withRuntimeOperation(async () => {
       await this.start();
@@ -607,13 +645,26 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.enforcePurgeFence();
       const effectiveNow = now ?? readM2Clock(this.clock);
       if (!Number.isFinite(effectiveNow)) throw new Error('ERR_CLOCK_UNAVAILABLE');
-      const records = await this.adapter.scanPublishedBusiness();
-      const expired = records.filter((record) => record.retentionClass === 'event' && record.expiresAt !== undefined && Date.parse(record.expiresAt) <= effectiveNow
-        && isReadonlyEventRecord(record) && typeof (record.payload as { source?: { consentId?: unknown } }).source?.consentId === 'string');
-      const consentIds = [...new Set(expired.map((record) => String((record.payload as { source: { consentId: string } }).source.consentId)))];
-      for (const id of consentIds) await this.deleteReadonlyConsentLineage(id);
-      return expired.length;
+      return this.expireReadonlyRetentionInternal(effectiveNow);
     }, false, 'runtime.expire-retention');
+  }
+
+  private async expireReadonlyRetentionInternal(effectiveNow: number): Promise<number> {
+    const consent = await this.loadReadonlyConsent();
+    const records = await this.adapter.scanPublishedBusiness();
+    const expired = records.filter((record) => {
+      if (record.retentionClass !== 'event' || !isReadonlyEventRecord(record)) return false;
+      const consentId = (record.payload as { source?: { consentId?: unknown } }).source?.consentId;
+      if (typeof consentId !== 'string') return false;
+      const storedExpiry = record.expiresAt ? Date.parse(record.expiresAt) : Number.NaN;
+      const policyExpiry = consent && !consent.revoked && consent.grant.id === consentId
+        ? Date.parse(record.writtenAt) + consent.policy.eventTtlDays * 86_400_000 : Number.NaN;
+      const expiry = [storedExpiry, policyExpiry].filter(Number.isFinite).sort((left, right) => left - right)[0];
+      return expiry !== undefined && expiry <= effectiveNow;
+    });
+    const consentIds = [...new Set(expired.map((record) => String((record.payload as { source: { consentId: string } }).source.consentId)))];
+    for (const id of consentIds) await this.deleteReadonlyConsentLineage(id, 'retention-expired');
+    return expired.length;
   }
 
   private async loadReadonlyConsent(): Promise<ReadonlyConsentSnapshot | null> {
@@ -1527,6 +1578,7 @@ const RUNTIME_ERROR_DISPOSITION: Readonly<Record<string, RuntimeErrorDisposition
   ERR_CLOCK_UNAVAILABLE: 'fault',
   ERR_CONSENT_REVOKED: 'expected',
   ERR_RETENTION_RANGE: 'expected',
+  ERR_RETENTION_EXTENSION_REQUIRES_CONSENT: 'expected',
   ERR_RETENTION_POLICY_MISSING: 'expected',
   ERR_RETENTION_POLICY_INVALID: 'expected',
   ERR_NO_ACCEPTED_EVENTS: 'expected',

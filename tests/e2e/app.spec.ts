@@ -119,6 +119,27 @@ test('runs bundled import, immutable correction, and Replay in the browser', asy
   await expect(page.locator('.domain-loop__status')).toContainText('Replay 完成');
 });
 
+test('exports an explicitly confirmed redacted TRACE package', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '查看证据详情' }).click();
+  const dialog = page.getByRole('dialog', { name: '证据与版本详情' });
+  await dialog.getByLabel('步骤 token').fill('visual-approval');
+  await dialog.getByLabel('审核人 token').fill('reviewer-1');
+  await dialog.getByRole('button', { name: '写入 TRACE' }).click();
+  await dialog.getByRole('button', { name: '准备 TRACE 诊断包' }).click();
+  await expect(dialog.getByRole('group', { name: '确认导出 TRACE' })).toBeVisible();
+  await dialog.getByText('我确认这是一次不可逆的本地诊断导出。').click();
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '确认导出' }).click();
+  expect((await downloadPromise).suggestedFilename()).toBe('proagi-trace.json');
+  const audit = await readStore(page, 'audit') as Array<Record<string, unknown>>;
+  const trace = audit.filter((record) => record.recordType === 'trace_event_v1');
+  expect(trace.length).toBeGreaterThan(0);
+  expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ payload: expect.objectContaining({ eventName: 'manual.check' }) })]));
+  expect(JSON.stringify(trace)).not.toContain('sourceItemKey');
+  expect(JSON.stringify(trace)).not.toContain('developer-day-bundled-v1');
+});
+
 test('accept and edit then delete closes the full claimKey lineage across reload', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '预览本地样例' }).click();

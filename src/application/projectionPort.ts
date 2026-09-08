@@ -1,6 +1,7 @@
 import type { Hash } from '../domain/types';
 import type { ChangeRecord, Cursor, ProjectionHeadRecord, StoredRecord, StoreMetaRecord } from './storageContracts';
 import type { RuntimeStoragePort } from './storagePort';
+import type { TraceRecord } from './trace';
 
 export interface ProjectionChangePage {
   readonly meta: StoreMetaRecord;
@@ -9,6 +10,7 @@ export interface ProjectionChangePage {
   readonly fullSnapshotRequired: boolean;
 }
 export interface ProjectionStoragePort extends Pick<RuntimeStoragePort, 'getMeta' | 'getRecord' | 'readCanonicalSnapshot' | 'beginInProcessRootMutation'> {
+  readonly appendTraceEvents?: (events: readonly TraceRecord[]) => Promise<void>;
   loadChangesSince(after: Cursor, limit?: number): Promise<ProjectionChangePage>;
   publishProjection(next: ProjectionHeadRecord, expectedSourceCursor: Cursor, expected?: {
     readonly privacyEpoch: number; readonly incarnation?: string; readonly projectionHash: Hash | null;

@@ -4,6 +4,7 @@ import type { Hash, WorkModelClaim } from '../domain/types';
 import { decodeWorkModelClaim } from '../application/persistedDecoders';
 import type { MarkdownExport, MarkdownProjection, ProjectionPort, ProjectionStoragePort } from '../application/projectionPort';
 import type { ProjectionHeadRecord, StoredRecord } from '../application/storageContracts';
+import { TraceRecorder, type TraceCounts } from '../application/trace';
 
 export const MARKDOWN_PROJECTION_ID = 'markdown-knowledge-v1';
 const payloadSchema = z.object({
@@ -15,10 +16,16 @@ const payloadSchema = z.object({
 export class MarkdownProjectionAdapter implements ProjectionPort {
   private enabled = true;
   private trustedHeadHash?: Hash;
-  constructor(private readonly store: ProjectionStoragePort) {}
+  private readonly trace?: TraceRecorder;
+  constructor(private readonly store: ProjectionStoragePort) {
+    if (store.appendTraceEvents) this.trace = new TraceRecorder({ appendTraceEvents: store.appendTraceEvents.bind(store) });
+  }
 
   async rebuild(options: { readonly forceFull?: boolean } = {}): Promise<MarkdownProjection> {
     this.assertEnabled();
+    const startedAt = Date.now();
+    let resultCode = 'OK';
+    let counts: TraceCounts | undefined;
     const release = this.store.beginInProcessRootMutation();
     try {
       const head = await this.store.getRecord<ProjectionHeadRecord>('projection', MARKDOWN_PROJECTION_ID);
@@ -52,13 +59,23 @@ export class MarkdownProjectionAdapter implements ProjectionPort {
         projectionHash: hashCanonical(payload), revision: (head?.revision ?? 0) + 1, payload,
       }, head?.sourceCursor ?? '0', { privacyEpoch: meta.privacyEpoch, incarnation: meta.incarnation, projectionHash: head?.projectionHash ?? null });
       this.trustedHeadHash = hashCanonical(payload);
-      return { sourceCursor: meta.cursor, privacyEpoch: meta.privacyEpoch, incarnation: meta.incarnation, markdown, documentCount: claims.length, mode, contentHash };
-    } finally { release(); }
+      const result = { sourceCursor: meta.cursor, privacyEpoch: meta.privacyEpoch, incarnation: meta.incarnation, markdown, documentCount: claims.length, mode, contentHash };
+      counts = { claims: claims.length };
+      return result;
+    } catch (error) {
+      resultCode = projectionTraceCode(error);
+      throw error;
+    } finally {
+      await this.recordTrace('projection.rebuild', resultCode, counts, startedAt);
+      release();
+    }
   }
 
   async export(confirmation: { readonly capability: 'projection.export'; readonly confirmedHash: Hash; readonly acknowledgeIrrevocable: true }): Promise<MarkdownExport> {
     this.assertEnabled();
     if (confirmation.capability !== 'projection.export' || confirmation.acknowledgeIrrevocable !== true) throw new Error('ERR_EXPORT_CONFIRMATION');
+    const startedAt = Date.now();
+    let resultCode = 'OK';
     const release = this.store.beginInProcessRootMutation();
     try {
       const projection = await this.rebuild();
@@ -67,9 +84,24 @@ export class MarkdownProjectionAdapter implements ProjectionPort {
       if (meta.recoveryMode !== 'NORMAL' || meta.cursor !== projection.sourceCursor || meta.privacyEpoch !== projection.privacyEpoch || meta.incarnation !== projection.incarnation) throw new Error('ERR_EXPORT_STALE');
       this.assertEnabled();
       return { ...projection, filename: 'proagi-knowledge.md', mediaType: 'text/markdown', highestClassification: 'local-sensitive', notice: 'LOCAL_FILE_CANNOT_BE_REMOTELY_REVOKED' };
-    } finally { release(); }
+    } catch (error) {
+      resultCode = projectionTraceCode(error);
+      throw error;
+    } finally {
+      await this.recordTrace('projection.export', resultCode, undefined, startedAt);
+      release();
+    }
   }
-  disable(): void { this.enabled = false; }
+  disable(): void {
+    this.enabled = false;
+    void this.trace?.record({ eventName: 'projection.disable', correlationId: crypto.randomUUID(), resultCode: 'OK' });
+  }
+  private async recordTrace(eventName: 'projection.rebuild' | 'projection.export', resultCode: string, counts: TraceCounts | undefined, startedAt: number): Promise<void> {
+    await this.trace?.record({
+      eventName, correlationId: crypto.randomUUID(), resultCode: projectionTraceResult(resultCode),
+      durationMs: Math.max(0, Math.round(Date.now() - startedAt)), ...(counts ? { counts } : {}),
+    }).catch(() => undefined);
+  }
   private assertEnabled(): void { if (!this.enabled) throw new Error('ERR_PROJECTION_DISABLED'); }
   private decode(head: ProjectionHeadRecord) {
     const result = payloadSchema.safeParse(head.payload);
@@ -78,6 +110,15 @@ export class MarkdownProjectionAdapter implements ProjectionPort {
     if (renderMarkdown(result.data.claims.map(decodeWorkModelClaim)) !== result.data.markdown) throw new Error('ERR_PROJECTION_CONFLICT');
     return result.data;
   }
+}
+
+function projectionTraceCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  return /^ERR_[A-Z0-9_]+$/.test(message) ? message : 'ERR_PROJECTION';
+}
+
+function projectionTraceResult(code: string): `ERR_${string}` | 'OK' {
+  return /^(?:OK|ERR_[A-Z0-9_]+)$/.test(code) ? code as `ERR_${string}` | 'OK' : 'ERR_PROJECTION';
 }
 
 function decodeRecords(records: readonly StoredRecord[]): WorkModelClaim[] {

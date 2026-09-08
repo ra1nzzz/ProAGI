@@ -10,6 +10,8 @@ import type { CorrectionAction } from '../domain/types';
 import type { ReplaySnapshotV1 } from '../domain/replay';
 import type { ReadonlyConsentSnapshot } from '../application/m2Consent';
 import type { MarkdownProjection } from '../application/projectionPort';
+import type { TraceExportPreview, TraceManualCheck } from '../application/trace';
+import type { Hash } from '../domain/types';
 import { sha256 } from '../domain/canonical';
 import { ORB_STATES, ORB_STATE_LABELS, type ContentMode, type OrbState } from './demoViewModel';
 import { buildInsightPresentation } from './presentation';
@@ -34,6 +36,15 @@ const stateShortLabels: Readonly<Record<OrbState, string>> = {
   PRIVATE: '隐私',
   ERROR: '错误',
 };
+
+const MANUAL_TRACE_CASES = [
+  { value: 'M1c.nvda', label: 'M1c · NVDA' },
+  { value: 'M1c.visual', label: 'M1c · 人工视觉' },
+  { value: 'M2.pilot', label: 'M2 · participant pilot' },
+  { value: 'M3.live-model', label: 'M3 · live-model evaluation' },
+  { value: 'M5.native-smoke', label: 'M5 · native/EXE smoke' },
+] as const;
+type ManualTraceCaseId = typeof MANUAL_TRACE_CASES[number]['value'];
 
 export interface AppShellProps {
   readonly runtimeFactory?: (notificationPort: RuntimeNotificationPort) => BrowserInsightRuntime;
@@ -84,6 +95,15 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const [projectionError, setProjectionError] = useState<string | null>(null);
   const [projectionExportOpen, setProjectionExportOpen] = useState(false);
   const [projectionExportAcknowledged, setProjectionExportAcknowledged] = useState(false);
+  const [tracePreview, setTracePreview] = useState<TraceExportPreview | null>(null);
+  const [traceExportOpen, setTraceExportOpen] = useState(false);
+  const [traceExportAcknowledged, setTraceExportAcknowledged] = useState(false);
+  const [traceBusy, setTraceBusy] = useState(false);
+  const [manualTraceCaseId, setManualTraceCaseId] = useState<ManualTraceCaseId>('M1c.visual');
+  const [manualTraceStepId, setManualTraceStepId] = useState('visual-approval');
+  const [manualTraceReviewerId, setManualTraceReviewerId] = useState('');
+  const [manualTraceResult, setManualTraceResult] = useState<TraceManualCheck['result']>('NOT_RUN');
+  const [manualTraceArtifactHash, setManualTraceArtifactHash] = useState('');
 
   const privateMode = canonicalPrivate;
 
@@ -443,6 +463,74 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
   const disableProjection = () => {
     disposeProjection();
     setAnnouncement('Markdown 投影已禁用；canonical store 未改变。');
+  };
+
+  const prepareTraceExport = async () => {
+    const runtime = runtimeRef.current;
+    if (!runtime || traceBusy) return;
+    setTraceBusy(true);
+    try {
+      const next = await runtime.prepareTraceExport();
+      setTracePreview(next);
+      setTraceExportAcknowledged(false);
+      setTraceExportOpen(true);
+      setAnnouncement(`TRACE 诊断包已准备，包含 ${next.eventCount} 条脱敏事件。`);
+    } catch (error) {
+      setAnnouncement(`TRACE 诊断包准备失败（${safeErrorCode(error)}）。`);
+    } finally {
+      setTraceBusy(false);
+    }
+  };
+
+  const exportTrace = async () => {
+    const runtime = runtimeRef.current;
+    const current = tracePreview;
+    if (!runtime || !current || !traceExportAcknowledged || traceBusy) return;
+    setTraceBusy(true);
+    try {
+      const artifact = await runtime.exportTrace({ confirmedHash: current.contentHash, acknowledgeIrrevocable: true });
+      const url = URL.createObjectURL(new Blob([artifact.content], { type: `${artifact.mediaType};charset=utf-8` }));
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = artifact.filename;
+        link.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      setTracePreview(artifact);
+      setTraceExportOpen(false);
+      setTraceExportAcknowledged(false);
+      setAnnouncement('TRACE 诊断包已导出；内容仅含脱敏本地诊断与哈希。');
+    } catch (error) {
+      setAnnouncement(`TRACE 导出未完成（${safeErrorCode(error)}）；请重新准备。`);
+    } finally {
+      setTraceBusy(false);
+    }
+  };
+
+  const recordManualTraceCheck = async () => {
+    const runtime = runtimeRef.current;
+    if (!runtime || traceBusy) return;
+    setTraceBusy(true);
+    try {
+      const artifactHash = manualTraceArtifactHash.trim();
+      await runtime.recordManualCheck({
+        caseId: manualTraceCaseId,
+        stepId: manualTraceStepId.trim(),
+        reviewerId: manualTraceReviewerId.trim(),
+        result: manualTraceResult,
+        artifactHashes: artifactHash ? [artifactHash as Hash] : [],
+      });
+      setTracePreview(null);
+      setTraceExportOpen(false);
+      setTraceExportAcknowledged(false);
+      setAnnouncement('人工核验结果已记录到 TRACE；请重新准备诊断包。');
+    } catch (error) {
+      setAnnouncement(`人工核验未记录（${safeErrorCode(error)}）。`);
+    } finally {
+      setTraceBusy(false);
+    }
   };
 
   const togglePrivacy = async () => {
@@ -1033,6 +1121,31 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
               <div><dt>版本</dt><dd>revision 2</dd></div>
               <div><dt>范围</dt><dd>{viewModel.learned.scope}</dd></div>
             </dl>
+            <div className="button-row">
+              <button type="button" className="button button--quiet" onClick={() => void prepareTraceExport()} disabled={traceBusy}>准备 TRACE 诊断包</button>
+            </div>
+            {traceExportOpen && tracePreview ? (
+              <fieldset className="projection-export">
+                <legend>确认导出 TRACE</legend>
+                <p>包含 {tracePreview.eventCount} 条固定 schema 的本地诊断事件，不包含原始输入、正文、路径或动态字段；导出文件无法被应用远程撤回。</p>
+                <p><code>{tracePreview.contentHash}</code></p>
+                <label className="checkbox-row"><input type="checkbox" checked={traceExportAcknowledged} onChange={(event) => setTraceExportAcknowledged(event.target.checked)} /> 我确认这是一次不可逆的本地诊断导出。</label>
+                <div className="button-row">
+                  <button type="button" className="button button--quiet" onClick={() => { setTraceExportOpen(false); setTraceExportAcknowledged(false); }} disabled={traceBusy}>取消</button>
+                  <button type="button" className="button button--primary" onClick={() => void exportTrace()} disabled={!traceExportAcknowledged || traceBusy}>确认导出</button>
+                </div>
+              </fieldset>
+            ) : null}
+            <fieldset className="projection-export trace-manual-check">
+              <legend>记录人工核验</legend>
+              <p>仅记录固定用例、步骤 token、审核人 token、结果和 SHA-256；不记录正文、路径、截图内容或自由文本。</p>
+              <label>用例<select value={manualTraceCaseId} onChange={(event) => setManualTraceCaseId(event.target.value as ManualTraceCaseId)}>{MANUAL_TRACE_CASES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+              <label>步骤 token<input value={manualTraceStepId} onChange={(event) => setManualTraceStepId(event.target.value)} pattern="[A-Za-z0-9._:-]{1,128}" maxLength={128} /></label>
+              <label>审核人 token<input value={manualTraceReviewerId} onChange={(event) => setManualTraceReviewerId(event.target.value)} pattern="[A-Za-z0-9._:-]{1,128}" maxLength={128} /></label>
+              <label>结果<select value={manualTraceResult} onChange={(event) => setManualTraceResult(event.target.value as TraceManualCheck['result'])}><option value="PASS">PASS</option><option value="FAIL">FAIL</option><option value="NOT_RUN">NOT_RUN</option></select></label>
+              <label>artifact SHA-256（可选）<input value={manualTraceArtifactHash} onChange={(event) => setManualTraceArtifactHash(event.target.value)} placeholder="sha256:..." pattern="sha256:[0-9a-f]{64}" maxLength={71} /></label>
+              <div className="button-row"><button type="button" className="button button--quiet" onClick={() => void recordManualTraceCheck()} disabled={!manualTraceStepId.trim() || !manualTraceReviewerId.trim() || traceBusy}>写入 TRACE</button></div>
+            </fieldset>
             <button ref={detailCloseRef} type="button" className="button button--primary" onClick={() => setDetailOpen(false)}>关闭详情</button>
           </aside>
         </div>

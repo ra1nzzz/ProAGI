@@ -109,8 +109,11 @@ describe('AppShell accessibility contracts', () => {
 
     const dialog = screen.getByRole('dialog', { name: '证据与版本详情' });
     const close = within(dialog).getByRole('button', { name: '关闭详情' });
+    const trace = within(dialog).getByRole('button', { name: '准备 TRACE 诊断包' });
     expect(close).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Tab' });
+    expect(trace).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     expect(close).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: '证据与版本详情' })).not.toBeInTheDocument();

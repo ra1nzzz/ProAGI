@@ -4,6 +4,7 @@ import type { RuntimeStoragePort } from '../application/storagePort';
 import type { ProjectionChangePage, ProjectionStoragePort } from '../application/projectionPort';
 import type { ChangeRecord } from '../application/storageContracts';
 import { toStoredRecord } from '../application/storageContracts';
+import { assertTraceRecord, TRACE_MAX_BYTES, TRACE_MAX_RECORDS, TRACE_RECORD_TYPE, TRACE_RETENTION_MS } from '../application/trace';
 export { makeBatch, toStoredRecord } from '../application/storageContracts';
 import {
   CommitResponseLostError,
@@ -370,6 +371,54 @@ export class IndexedDbM1bAdapter implements RuntimeStoragePort {
     const values = await requestValue<T[]>(tx.objectStore(storeName).getAll());
     await transactionDone(tx);
     return values;
+  }
+
+  async appendTraceEvents(events: readonly StoredRecord[]): Promise<void> {
+    if (events.length === 0) return;
+    if (events.length > 128) throw new M1bError('ERR_TRACE_BATCH_LIMIT');
+    const now = this.clock();
+    if (!Number.isFinite(now)) throw new M1bError('ERR_CLOCK_UNAVAILABLE');
+    return this.withRootMutation(async () => {
+      const db = await this.database();
+      const tx = this.mutationTransaction(db, 'audit', 'readwrite');
+      const done = transactionDone(tx);
+      try {
+        const store = tx.objectStore('audit');
+        const existing = await requestValue<StoredRecord[]>(store.getAll());
+        const byId = new Map(existing.map((record) => [record.recordId, record]));
+        for (const record of events) {
+          assertTraceRecord(record);
+          const prior = byId.get(record.recordId);
+          if (prior && prior.contentHash !== record.contentHash) throw new M1bError('ERR_TRACE_CONFLICT');
+          byId.set(record.recordId, record);
+        }
+        const cutoff = now - TRACE_RETENTION_MS;
+        const traceRecords = [...byId.values()]
+          .filter((record) => record.recordType === TRACE_RECORD_TYPE)
+          .filter((record) => Date.parse(record.expiresAt ?? record.writtenAt) > now && Date.parse(record.writtenAt) > cutoff)
+          .sort((left, right) => Date.parse(left.writtenAt) - Date.parse(right.writtenAt) || left.recordId.localeCompare(right.recordId));
+        const retained: StoredRecord[] = [];
+        let bytes = 0;
+        for (const record of traceRecords.slice(-TRACE_MAX_RECORDS).reverse()) {
+          const size = estimateBytes(record);
+          if (retained.length >= TRACE_MAX_RECORDS || bytes + size > TRACE_MAX_BYTES) continue;
+          retained.push(record);
+          bytes += size;
+        }
+        const retainedIds = new Set(retained.map((record) => record.recordId));
+        for (const record of existing) {
+          if (record.recordType === TRACE_RECORD_TYPE && !retainedIds.has(record.recordId)) store.delete(record.recordId);
+        }
+        for (const record of events) {
+          if (retainedIds.has(record.recordId) && !existing.some((item) => item.recordId === record.recordId)) store.add(record);
+        }
+        await done;
+      } catch (error) {
+        safeAbort(tx);
+        await done.catch(() => undefined);
+        throw normalizeIdbError(error);
+      }
+    });
   }
 
   async readPurgeFence(): Promise<{ meta: StoreMetaRecord; journals: ActiveDeletionJournalRecord[] }> {

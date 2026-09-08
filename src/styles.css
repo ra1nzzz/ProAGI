@@ -249,6 +249,9 @@ dd { margin: 5px 0 0; overflow-wrap: anywhere; line-height: 1.45; }
 .projection-export { margin: 0; padding: 16px; border: 1px solid #e0aa5d; border-radius: 12px; background: #fff8ea; }
 .projection-export legend { padding: 0 6px; font-weight: 800; }
 .projection-export p { margin: 0 0 12px; color: var(--ink-muted); line-height: 1.55; }
+.trace-manual-check { display: grid; gap: 10px; margin-top: 16px; }
+.trace-manual-check label { display: grid; gap: 5px; color: var(--ink-muted); font-size: 0.86rem; }
+.trace-manual-check input, .trace-manual-check select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #cbd1da; border-radius: 8px; background: var(--surface-raised); color: var(--ink); }
 code { overflow-wrap: anywhere; color: #314158; }
 
 .empty-state { display: grid; place-items: start; min-height: 170px; margin-top: 18px; padding: 24px; border: 1px dashed var(--line-strong); border-radius: 12px; background: #faf9f6; }

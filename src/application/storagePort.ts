@@ -30,6 +30,7 @@ export interface RuntimeStoragePort {
   getMeta(): Promise<StoreMetaRecord>;
   getRecord<T>(storeName: StoreName, key: StorageKey): Promise<T | undefined>;
   getAll<T>(storeName: StoreName): Promise<T[]>;
+  appendTraceEvents(events: readonly StoredRecord[]): Promise<void>;
   readPurgeFence(): Promise<{ readonly meta: StoreMetaRecord; readonly journals: ActiveDeletionJournalRecord[] }>;
   readCanonicalSnapshot(): Promise<{ readonly meta: StoreMetaRecord; readonly business: StoredRecord[]; readonly heads: StoredRecord[] }>;
   commit(batch: AtomicMutationBatch, options?: { readonly simulateResponseLoss?: boolean }): Promise<CommitResult>;

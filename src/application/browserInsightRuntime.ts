@@ -1,7 +1,7 @@
 import { makeBatch, toStoredRecord, CommitResponseLostError } from './storageContracts';
 import type { AtomicMutationBatch, StoredRecord } from './storageContracts';
 import { hashCanonical, sha256 } from '../domain/canonical';
-import type { BehaviorEvent, CorrectionAction, CorrectionCommand, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
+import type { BehaviorEvent, CorrectionAction, CorrectionCommand, Hash, KnowledgeSnapshot, WorkModelClaim } from '../domain/types';
 import { runInsightLoop } from '../domain/insightLoop';
 import type { ReadonlyObservationAdapter } from './ports';
 import { makeConsentGrant, makeConsentRevocation, makeRetentionPolicy, type ConsentGrant, type ConsentRevocation, type ReadonlyConsentSnapshot, type RetentionPolicy } from './m2Consent';
@@ -11,6 +11,7 @@ import { EXTERNAL_PURGE_EVENT, PURGE_COMMITTED_EVENT, RUNTIME_ERROR_EVENT, RUNTI
 import type { ImportCommit } from './insightService';
 import { decodeBehaviorEvent, decodeCorrectionRecord, decodeFixtureMarker, decodeKnowledgeHead, decodeKnowledgeVersion, decodeWorkModelClaim } from './persistedDecoders';
 import type { RuntimeStoragePort } from './storagePort';
+import { assertTraceRecord, makeTraceExportPreview, TraceRecorder, type TraceCounts, type TraceEventName, type TraceExportPreview, type TraceManualCheck, type TraceRecord, type TraceResultCode } from './trace';
 
 const FIXTURE_MARKER_ID = 'fixture-commit:developer-day-bundled-v1';
 const PURGE_CLIENT_WAIT_MS = 15_000;
@@ -132,6 +133,7 @@ export interface BrowserInsightRuntimeOptions {
   readonly notificationPort?: RuntimeNotificationPort;
   readonly cacheClearTimeoutMs?: number;
   readonly testHooks?: BrowserRuntimeTestHooks;
+  readonly trace?: TraceRecorder;
 }
 
 export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, ControlPort {
@@ -145,6 +147,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private readonly clock: () => number;
   private readonly scheduler: BrowserRuntimeScheduler;
   private readonly cacheStore: BrowserRuntimeCacheStore | null;
+  private readonly trace: TraceRecorder;
   private clientRenewal: ReturnType<typeof setInterval> | null = null;
   private clientRegistered = false;
   private operationGeneration = 0;
@@ -163,6 +166,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   private purgeFenceCheck: Promise<boolean> | null = null;
   private closePromise: Promise<void> | null = null;
   private clearPromise: Promise<void> | null = null;
+  private pendingTraceExport: TraceExportPreview | null = null;
   private readonly cacheClearTimeoutMs: number;
   private inFlightOperations = 0;
   private readonly operationDrainWaiters = new Set<() => void>();
@@ -199,7 +203,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       void this.withRuntimeOperation(async () => {
         await this.catchUpPurgeFence();
         if (!this.closed) this.notifyRuntimeSnapshot(false);
-      }).catch((error) => this.reportBackgroundFailure('state-change-catch-up', error));
+      }, false, 'runtime.background').catch((error) => this.reportBackgroundFailure('state-change-catch-up', error));
     }
   };
 
@@ -213,6 +217,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     this.scheduler = options.scheduler ?? DEFAULT_RUNTIME_SCHEDULER;
     this.cacheStore = options.cacheStore === undefined ? defaultCacheStore() : options.cacheStore;
     this.adapter = this.adapterFactory();
+    this.trace = options.trace ?? new TraceRecorder({ appendTraceEvents: (events) => this.adapter.appendTraceEvents(events) }, this.clock);
     this.service = this.serviceFactory();
     this.clientId = (options.clientIdFactory ?? (() => crypto.randomUUID()))();
     this.purgeChannel = (options.channelFactory ?? (() => typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('proagi-purge-v1')))();
@@ -241,10 +246,12 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       if (this.closed || observedGeneration !== this.operationGeneration) return false;
       const active = journals.find((item) => item.recordType === 'active_deletion_journal' && item.state !== 'FAILED');
       if (active) {
+        this.pendingTraceExport = null;
         await this.releaseForPurge(active.id, active.purge.generation);
         return true;
       }
       if (meta.recoveryMode !== 'NORMAL') {
+        this.pendingTraceExport = null;
         await this.releaseLocalRuntime();
         if (this.closed) return false;
         this.notifyRuntimeSnapshot(true, meta.observationMode);
@@ -271,6 +278,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         : undefined;
       const purgeAdvance = incarnationChanged || Boolean(meta.lastPurgeCursor && previousCursor !== null && BigInt(meta.lastPurgeCursor) > BigInt(previousCursor)) || Boolean(staleWatermark);
       if (durableAdvanced) {
+        this.pendingTraceExport = null;
         // Any unexplained external cursor advance invalidates in-memory state.
         // A durable purge cursor (or retained watermark) is required before
         // asking the UI to perform the destructive purge handshake.
@@ -300,7 +308,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
 
   private runBackgroundOperation(operation: string, task: () => Promise<unknown>): void {
     try {
-      void this.withRuntimeOperation(task).catch((error) => this.reportBackgroundFailure(operation, error));
+      void this.withRuntimeOperation(task, false, 'runtime.background').catch((error) => this.reportBackgroundFailure(operation, error));
     } catch (error) {
       this.reportBackgroundFailure(operation, error);
     }
@@ -388,7 +396,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
   }
 
-  async start(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.startInternal(), true); }
+  async start(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.startInternal(), true, 'runtime.start'); }
 
   private async startInternal(): Promise<BrowserRuntimeSnapshot> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
@@ -482,7 +490,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.withRuntimeOperation(async () => {
       await this.start();
       return this.loadReadonlyConsent();
-    }, true);
+    }, true, 'runtime.snapshot');
   }
 
   async revokeConsent(consentId?: string): Promise<void> {
@@ -518,7 +526,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const snapshot = { grant, policy, revoked: false } as const;
       this.readonlyConsent = snapshot;
       return snapshot;
-    });
+    }, false, 'runtime.grant-consent');
   }
 
   async previewReadonly(input: { readonly utf8: string; readonly sourceItemKey?: string }): Promise<ObservationPreviewDTO> {
@@ -566,13 +574,14 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         await this.bestEffort('readonly-preview-cancel', () => this.adapter.cancelPreview(staged.token));
         throw error;
       }
-    });
+    }, false, 'runtime.preview-readonly');
   }
 
   async revokeReadonlyConsent(consentId?: string): Promise<void> {
     return this.withRuntimeOperation(async () => {
       await this.start();
       await this.enforcePurgeFence();
+      this.pendingTraceExport = null;
       const snapshot = await this.loadReadonlyConsent();
       const id = consentId ?? snapshot?.grant.id;
       if (!snapshot || !id || snapshot.grant.id !== id) throw new Error('ERR_CONSENT_NOT_FOUND');
@@ -588,7 +597,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.deleteReadonlyConsentLineage(id);
       await this.hydrate();
       this.notifyRuntimeSnapshot(true);
-    });
+    }, false, 'runtime.revoke-consent');
   }
 
   async expireReadonlyRetention(now?: number): Promise<number> {
@@ -603,7 +612,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       const consentIds = [...new Set(expired.map((record) => String((record.payload as { source: { consentId: string } }).source.consentId)))];
       for (const id of consentIds) await this.deleteReadonlyConsentLineage(id);
       return expired.length;
-    });
+    }, false, 'runtime.expire-retention');
   }
 
   private async loadReadonlyConsent(): Promise<ReadonlyConsentSnapshot | null> {
@@ -637,7 +646,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         token, acceptedCount: result.acceptedCount, episodeCount: result.output.episodes.length,
         insightCount: result.output.claims.length, source: 'bundled-synthetic-fixture',
       };
-    });
+    }, false, 'runtime.preview');
   }
 
   async commit(token: string): Promise<ImportCommit> {
@@ -646,25 +655,25 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.enforcePurgeFence();
       if (!this.pendingPreview || this.pendingPreview.token !== token) throw new Error('ERR_PREVIEW_STALE');
       return this.commitBundled();
-    });
+    }, false, 'runtime.commit');
   }
 
   async submit(action: Exclude<CorrectionAction, 'restore'>): Promise<CorrectionResult> {
-    return this.withRuntimeOperation(() => this.correct(action));
+    return this.withRuntimeOperation(() => this.correct(action), false, 'runtime.correction');
   }
 
   async pausePrivacy(): Promise<{ readonly privacyEpoch: number }> {
     return this.withRuntimeOperation(async () => {
       const snapshot = await this.setPrivacyMode('PRIVATE');
       return { privacyEpoch: snapshot.privacyEpoch };
-    });
+    }, false, 'runtime.privacy');
   }
 
   async resumePrivacy(): Promise<{ readonly privacyEpoch: number }> {
     return this.withRuntimeOperation(async () => {
       const snapshot = await this.setPrivacyMode('ACTIVE');
       return { privacyEpoch: snapshot.privacyEpoch };
-    });
+    }, false, 'runtime.privacy');
   }
 
   async evaluateReplay() {
@@ -672,10 +681,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
       await this.start();
       await this.enforcePurgeFence();
       return this.replay();
-    });
+    }, false, 'runtime.evaluate-replay');
   }
 
-  async previewBundled(now = this.clock()): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.previewBundledInternal(now)); }
+  async previewBundled(now = this.clock()): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.previewBundledInternal(now), false, 'runtime.preview-bundled'); }
 
   private async previewBundledInternal(now = this.clock()): Promise<ImportCommit> {
     await this.start();
@@ -726,7 +735,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     }
   }
 
-  async commitBundled(options: { simulateResponseLoss?: boolean } = {}): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.commitBundledInternal(options)); }
+  async commitBundled(options: { simulateResponseLoss?: boolean } = {}): Promise<ImportCommit> { return this.withRuntimeOperation(() => this.commitBundledInternal(options), false, 'runtime.commit-bundled'); }
 
   private async commitBundledInternal(options: { simulateResponseLoss?: boolean } = {}): Promise<ImportCommit> {
     const generation = this.operationGeneration;
@@ -806,10 +815,10 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.withRuntimeOperation(async () => {
       await this.previewBundled(now);
       return this.commitBundled();
-    });
+    }, false, 'runtime.import');
   }
 
-  async setPrivacyMode(mode: 'ACTIVE' | 'PRIVATE'): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.setPrivacyModeInternal(mode)); }
+  async setPrivacyMode(mode: 'ACTIVE' | 'PRIVATE'): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.setPrivacyModeInternal(mode), false, 'runtime.privacy'); }
 
   private async setPrivacyModeInternal(mode: 'ACTIVE' | 'PRIVATE'): Promise<BrowserRuntimeSnapshot> {
     await this.start();
@@ -817,12 +826,13 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     const meta = await this.adapter.getMeta();
     await this.adapter.setPrivacyMode(meta.cursor, meta.privacyEpoch, mode, crypto.randomUUID());
     this.lastDurableCursor = (await this.adapter.getMeta()).cursor;
+    if (mode === 'PRIVATE') this.pendingTraceExport = null;
     this.purgeChannel?.postMessage({ type: 'STATE_CHANGED', clientId: this.clientId });
     if (mode === 'PRIVATE') this.pendingPreview = null;
     return this.snapshot();
   }
 
-  async correct(action: Exclude<CorrectionAction, 'restore'>): Promise<CorrectionResult> { return this.withRuntimeOperation(() => this.correctInternal(action)); }
+  async correct(action: Exclude<CorrectionAction, 'restore'>): Promise<CorrectionResult> { return this.withRuntimeOperation(() => this.correctInternal(action), false, 'runtime.correction'); }
 
   private async correctInternal(action: Exclude<CorrectionAction, 'restore'>): Promise<CorrectionResult> {
     const generation = this.operationGeneration;
@@ -1047,11 +1057,12 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return [...new Set(lineageRecords.flatMap(identityAnchors))].sort();
   }
 
-  async clear(): Promise<void> { return this.withRuntimeOperation(() => this.clearInternal(), true); }
+  async clear(): Promise<void> { return this.withRuntimeOperation(() => this.clearInternal(), true, 'runtime.clear'); }
 
   private async clearInternal(): Promise<void> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
     if (this.clearPromise) return this.clearPromise;
+    this.pendingTraceExport = null;
     this.clearPromise = (async () => {
       await this.start();
       if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
@@ -1084,7 +1095,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.clearPromise;
   }
 
-  async recover(): Promise<void> { return this.withRuntimeOperation(() => this.recoverInternal(), true); }
+  async recover(): Promise<void> { return this.withRuntimeOperation(() => this.recoverInternal(), true, 'runtime.recover'); }
 
   private async clearRuntimeFaultAfterVerifiedRecovery(purge = false): Promise<void> {
     const snapshot = await this.snapshotInternal();
@@ -1130,7 +1141,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     await this.clearRuntimeFaultAfterVerifiedRecovery(true);
   }
 
-  async replay() { return this.withRuntimeOperation(() => this.replayInternal()); }
+  async replay() { return this.withRuntimeOperation(() => this.replayInternal(), false, 'runtime.replay'); }
 
   private async replayInternal() {
     await this.start();
@@ -1139,7 +1150,50 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return this.service.replay();
   }
 
-  async snapshot(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.snapshotInternal(), true); }
+  async snapshot(): Promise<BrowserRuntimeSnapshot> { return this.withRuntimeOperation(() => this.snapshotInternal(), true, 'runtime.snapshot'); }
+
+  async recordManualCheck(input: TraceManualCheck): Promise<void> {
+    if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
+    this.pendingTraceExport = null;
+    await this.trace.recordManualCheck({ ...input, correlationId: crypto.randomUUID() });
+  }
+
+  async getTraceEvents(): Promise<readonly TraceRecord[]> {
+    if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
+    await this.trace.flush();
+    return (await this.adapter.getAll<TraceRecord>('audit')).filter((record) => {
+      if (record.recordType !== 'trace_event_v1') return false;
+      assertTraceRecord(record);
+      return true;
+    }).sort((left, right) => left.recordId.localeCompare(right.recordId));
+  }
+
+  async prepareTraceExport(): Promise<TraceExportPreview> {
+    if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
+    await this.startInternal();
+    const events = await this.getTraceEvents();
+    const meta = await this.adapter.getMeta();
+    const preview = makeTraceExportPreview({ sourceCursor: meta.cursor, privacyEpoch: meta.privacyEpoch, events });
+    this.pendingTraceExport = preview;
+    return preview;
+  }
+
+  async exportTrace(confirmation: { readonly confirmedHash: Hash; readonly acknowledgeIrrevocable: true }): Promise<TraceExportPreview> {
+    return this.withRuntimeOperation(async () => {
+      await this.enforcePurgeFence();
+      const preview = this.pendingTraceExport;
+      if (!preview) throw new Error('ERR_EXPORT_PREVIEW_REQUIRED');
+      if (confirmation.acknowledgeIrrevocable !== true) throw new Error('ERR_EXPORT_CONFIRMATION');
+      const meta = await this.adapter.getMeta();
+      if (meta.recoveryMode !== 'NORMAL' || meta.privacyEpoch !== preview.privacyEpoch) {
+        this.pendingTraceExport = null;
+        throw new Error('ERR_EXPORT_STALE');
+      }
+      if (preview.contentHash !== confirmation.confirmedHash) throw new Error('ERR_EXPORT_STALE');
+      this.pendingTraceExport = null;
+      return preview;
+    }, false, 'artifact.export');
+  }
 
   private async snapshotInternal(): Promise<BrowserRuntimeSnapshot> {
     await this.start();
@@ -1152,22 +1206,40 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
     return { observationMode: meta.observationMode, cursor: meta.cursor, privacyEpoch: meta.privacyEpoch, imported: this.imported, runtimeFaulted: this.runtimeFaulted, readonlyConsent: this.readonlyConsentLoaded ? this.readonlyConsent : null };
   }
 
-  private withRuntimeOperation<T>(operation: () => Promise<T>, allowFaulted = false): Promise<T> {
+  private withRuntimeOperation<T>(operation: () => Promise<T>, allowFaulted = false, traceName: TraceEventName = 'runtime.operation'): Promise<T> {
     if (this.closed) throw new Error('ERR_RUNTIME_CLOSED');
     if (this.runtimeFaulted && !allowFaulted) throw new Error('ERR_RUNTIME_FAULTED');
     this.inFlightOperations += 1;
+    const correlationId = crypto.randomUUID();
+    const startedAt = traceClock(this.clock);
+    const recordTrace = (level: 'info' | 'warn' | 'error', resultCode: string, value?: unknown): Promise<void> => {
+      const counts = traceCounts(value);
+      return this.trace.record({
+        eventName: traceName,
+        level,
+        correlationId,
+        resultCode: toTraceResultCode(resultCode),
+        durationMs: Math.max(0, Math.round(traceClock(this.clock) - startedAt)),
+        ...(counts ? { counts } : {}),
+      }).then(() => undefined).catch(() => undefined);
+    };
     let result: Promise<T>;
     try {
       result = operation();
     } catch (error) {
       this.releaseRuntimeOperation();
       this.latchRuntimeFault(error);
+      void recordTrace(isBenignRuntimeError(error) ? 'warn' : 'error', runtimeErrorCode(error));
       throw error;
     }
     return result
+      .then(async (value) => {
+        await recordTrace('info', 'OK', value);
+        return value;
+      })
       .catch((error) => {
         this.latchRuntimeFault(error);
-        throw error;
+        return recordTrace(isBenignRuntimeError(error) ? 'warn' : 'error', runtimeErrorCode(error)).then(() => { throw error; });
       })
       .finally(() => this.releaseRuntimeOperation());
   }
@@ -1189,6 +1261,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.pendingTraceExport = null;
     this.operationGeneration += 1;
     this.imported = null;
     this.service = this.serviceFactory();
@@ -1224,6 +1297,7 @@ export class BrowserInsightRuntime implements ObservationPort, CorrectionPort, C
         await this.bestEffort('close-client', () => adapter.closeClient(this.clientId));
         this.clientRegistered = false;
       }
+      await this.trace.record({ eventName: 'runtime.close', correlationId: crypto.randomUUID(), resultCode: 'OK' }).catch(() => undefined);
       adapter.dispose();
     })();
     return this.closePromise;
@@ -1355,6 +1429,33 @@ function readM2Clock(clock: () => number): number {
   const now = clock();
   if (!Number.isFinite(now)) throw new Error('ERR_CLOCK_UNAVAILABLE');
   return now;
+}
+
+function traceClock(clock: () => number): number {
+  try {
+    const value = clock();
+    return Number.isFinite(value) ? value : Date.now();
+  } catch {
+    return Date.now();
+  }
+}
+
+function toTraceResultCode(code: string): TraceResultCode {
+  return /^(?:OK|PASS|FAIL|NOT_RUN|SKIPPED|ERR_[A-Z0-9_]+)$/.test(code) ? code as TraceResultCode : 'ERR_RUNTIME_BACKGROUND';
+}
+
+function traceCounts(value: unknown): TraceCounts | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const counts: TraceCounts = {};
+  const fields: readonly (readonly [string, keyof TraceCounts])[] = [
+    ['acceptedCount', 'accepted'], ['rejectedCount', 'rejected'], ['episodeCount', 'episodes'], ['insightCount', 'claims'],
+  ];
+  for (const [sourceKey, traceKey] of fields) {
+    const item = source[sourceKey];
+    if (typeof item === 'number' && Number.isSafeInteger(item) && item >= 0) counts[traceKey] = item;
+  }
+  return Object.keys(counts).length > 0 ? counts : undefined;
 }
 
 function isReadonlyEventRecord(record: StoredRecord): boolean {

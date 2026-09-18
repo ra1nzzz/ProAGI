@@ -11,3 +11,7 @@ src-tauri/target/
 src-tauri/gen/
 evidence-logs/
 .DS_Store
+
+# OneDrive conflict copies produced by DESKTOP-ODA8L31; the tracked original is authoritative.
+scripts/* 的冲突副本*.mjs
+scripts/* 的冲突副本*.mjs.*

@@ -89,6 +89,17 @@ test('native clear does not replace the canonical web-storage purge path', async
   assert.match(shell, /recoveryRelease|indexedDb|deleteDatabase/, 'a full user-data purge path must remain available in the shell');
 });
 
+test('native shell state has its own clear entry point that does not claim to clear IndexedDB', async () => {
+  // Without a standalone entry point a user who never granted any readonly source could
+  // not disable UIA and advance the privacy epoch. It must be exposed, but it must not
+  // imply it removes canonical user data — that only revokeConsent does.
+  const controls = await text('src/ui/NativeShellControls.tsx');
+  assert.match(controls, /clearNativeState/);
+  assert.match(controls, /清理原生壳状态/);
+  assert.match(controls, /撤回真实来源授权/, 'the button must state that IndexedDB data is cleared elsewhere');
+  assert.doesNotMatch(controls, /recoveryRelease|deleteDatabase|purgeAll/, 'native controls must not own the canonical purge path');
+});
+
 test('native shell controls sit at the AppShell top level and not inside a closed section', async () => {
   const shell = await text('src/ui/AppShell.tsx');
   assert.match(shell, /<NativeShellControls \/>/);

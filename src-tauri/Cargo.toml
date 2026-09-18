@@ -24,5 +24,7 @@ log = "0.4"
 sha2 = "0.10"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-log = "2"
+
+[target.'cfg(windows)'.dependencies]
 uiautomation = { version = "0.25.1", default-features = false, features = ["input", "control"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

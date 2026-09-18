@@ -150,6 +150,36 @@ jobs:
       - if: always() && (steps.verify.outcome != 'success' || steps.artifact_scan.outcome != 'success')
         run: exit 1
 
+  native_ipc:
+    name: native-ipc (no promotion)
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.tier == 'pr')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify native IPC contract
+        id: verify
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          mkdir -p evidence-logs
+          cargo test --manifest-path src-tauri/Cargo.toml 2>&1 | tee evidence-logs/native-ipc.log
+          verify_status="${PIPESTATUS[0]}"
+          printf '\nCOMMAND_RECORD command="cargo test --manifest-path src-tauri/Cargo.toml" exitCode=%s retries=0\n' "$verify_status" >> evidence-logs/native-ipc.log
+          exit "$verify_status"
+      - name: Upload native IPC log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proagi-native-ipc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence-logs/native-ipc.log
+          if-no-files-found: warn
+          retention-days: 30
+      - if: always() && steps.verify.outcome != 'success'
+        run: exit 1
+
   release_candidate:
     name: release-candidate (no promotion)
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tier == 'release')

@@ -23,8 +23,8 @@ Passed in the repository workspace:
 - `npm.cmd run lint`
 - `npm.cmd run build`
 - `npm.cmd run check:production-artifact`
-- `npm.cmd run test:ipc` — 6 passed
-- `npm.cmd run test:release-gates` — 19 passed, 1 skipped by design
+- `npm.cmd run test:ipc` — 6 passed (also enforced by the `native_ipc` CI job on `windows-latest`)
+- `npm.cmd run test:release-gates` — 21 passed, 1 skipped by design
 - `npm.cmd run check:native-artifact` — NSIS and MSI bundles present
 - `npm.cmd run tauri:build`
 - `npm.cmd run test:native`
@@ -34,6 +34,25 @@ Passed in the repository workspace:
 - `npm.cmd run test:e2e` — 36/36 across `chromium-desktop` and `chromium-320`
 
 Generated release artifacts are under `src-tauri/target/release/bundle/` and are ignored build output.
+
+## Why the native tests run on a Windows job
+
+The native crate cannot be built or tested on the Linux runners, and adding it there
+would fail for no verification benefit:
+
+- `windows-rs` is declared `#![cfg(windows)]`, so it produces an empty crate off
+  Windows while every symbol our code references disappears.
+- `tauri` unconditionally pulls the full GTK/WebKitGTK stack on Linux, which would
+  require `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` just to compile a test binary that
+  exercises no Linux code path.
+
+The six IPC unit tests only exercise pure `NativeStateInner` logic, so they are run by
+a dedicated `native_ipc` job on `windows-latest`. They must **not** be added to the
+Linux `pr`/`nightly`/`release` command registries; a gate test enforces both halves of
+that rule.
+
+The Rust toolchain is pinned in `src-tauri/rust-toolchain.toml` to match the version
+other checks pin for Node and npm, so CI cannot drift from the audited build.
 
 The native shell stays read-only by contract, not only by dependency features: the
 `uiautomation` crate requires its `input` feature for its `core` module, so

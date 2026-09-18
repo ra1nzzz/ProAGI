@@ -29,6 +29,29 @@ test('native shell exposes only the audited read-only control surface', async ()
   assert.equal(packageJson.scripts['test:ipc'], 'cargo test --manifest-path src-tauri/Cargo.toml');
 });
 
+test('native Rust verification is wired into a Windows CI job and not into the Linux tiers', async () => {
+  // The native crate cannot build on Linux: windows-rs is `#![cfg(windows)]`, and
+  // tauri pulls the whole GTK/WebKitGTK stack there for zero benefit. The IPC unit
+  // tests exercise pure NativeStateInner logic, so they must run on a Windows runner
+  // and must not be added to the Linux pr/nightly/release command registries.
+  const workflow = await text('.github/workflows/verify.yml');
+  assert.match(workflow, /native_ipc:/);
+  const jobStart = workflow.indexOf('  native_ipc:');
+  const rest = workflow.slice(jobStart + 1);
+  const nextJob = rest.search(/\n {2}[\w][\w-]*:/);
+  const job = nextJob === -1 ? rest : rest.slice(0, nextJob);
+  assert.match(job, /runs-on:\s*windows-latest/);
+  assert.match(job, /cargo test --manifest-path src-tauri\/Cargo\.toml/);
+
+  const suites = await text('scripts/check-suites.mjs');
+  assert.doesNotMatch(suites, /cargo|Cargo\.toml/, 'native cargo commands must not run on the Linux runners');
+});
+
+test('native Rust toolchain is pinned so CI cannot drift from the audited build', async () => {
+  const pin = await text('src-tauri/rust-toolchain.toml');
+  assert.match(pin, /channel\s*=\s*"\d+\.\d+(\.\d+)?"/);
+});
+
 test('native shell never calls a UIA input-injection or value-writing API', async () => {
   // The uiautomation crate's `core` module hard-requires the `input` feature, so it
   // cannot be dropped at the manifest level. The read-only guarantee is therefore

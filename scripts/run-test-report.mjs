@@ -47,15 +47,16 @@ const reportPath = resolve(outputRoot, `${runner}-report.json`);
 await mustNotExist(outputRoot);
 await mkdir(outputRoot, { recursive: true });
 
-const executable = resolve(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? `${runner}.cmd` : runner);
+const executable = process.execPath;
+const runnerScript = resolve(repoRoot, 'node_modules', runner === 'vitest' ? 'vitest/vitest.mjs' : '@playwright/test/cli.js');
 let args;
 const env = { ...process.env, TEST_RUN_ID: runId, TEST_LANE: lane };
 if (runner === 'vitest') {
-  args = ['run', ...runnerArgs, '--reporter=default', '--reporter=json', `--outputFile=${reportPath}`];
+  args = [runnerScript, 'run', ...runnerArgs, '--reporter=default', '--reporter=json', `--outputFile=${reportPath}`];
 } else {
   env.PLAYWRIGHT_JSON_OUTPUT_FILE = reportPath;
   env.PLAYWRIGHT_OUTPUT_DIR = resolve(outputRoot, 'artifacts');
-  args = ['test', ...runnerArgs];
+  args = [runnerScript, 'test', ...runnerArgs];
 }
 const result = await run(executable, args, env);
 if (result.code !== 0) throw new Error(`${runner} exited with ${result.code ?? `signal ${result.signal}`}`);

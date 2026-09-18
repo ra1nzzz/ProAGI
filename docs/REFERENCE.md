@@ -48,6 +48,9 @@
 - 跨标签状态传播与删除/PURGE 的本地 Chromium 证据由测试提交 `a42511fd79a4a69583660101bcf2d737566e809c`、tree `0da5c1845ab8ad493d4d4f669c5a4aea411d987b` 提供；该提交只增加 E2E 断言，不扩大 hosted CI、独立进程或人工 Gate 结论。
 - 2026-09-09 的 Worker 与 consent-bound 用户文件 ImportSession 接线由 `src/workers/browserImport.ts`、`src/workers/ndjson.worker.ts`、`src/application/browserInsightRuntime.ts`、`tests/worker/browserImport.test.ts` 与对应 Chromium E2E 断言提供；bundled synthetic 与严格 `json-import` 本地文件路径已实测；持续桌面监听、自动采集和任意格式 adapter 仍未实现。
 - 当前实现基线：M2 pilot evidence runner、TRACE、readonly revoke 竞态修复、授权边界展示、retention shortening、M4 action-decision TRACE 入口和预注册 case 校验已提交于 commit `8a6eb08`（其 tree 为 `5753e347077131b968ad9f02f1eaaaa2bb816d64`）；知识库入口初始提交为 `98ecb82`。live action 仍为 0。
+- M5 原生壳基线由 `src-tauri/`、`src/nativeBridge.ts`、`src/ui/NativeShellControls.tsx` 与 `scripts/check-native-artifact.mjs` 提供。Gate 5 仍为 `NOT_RUN`：只有 workspace 内 typecheck/lint/build/IPC 单测/artifact 检查与 NSIS+MSI bundle 存在性证据，缺 Windows 支持矩阵、资源测量和独立人工可访问性证据，不得据此宣称“已完成窄 Windows UIA 验证”。
+- 原生壳的只读保证由契约而非依赖特性保证：`uiautomation` 的 `core` 模块硬依赖 `input` feature，无法在 manifest 层移除，因此 `scripts/tests/native-shell.test.mjs` 改为禁止全部注入/写入入口并只允许 `get_*` 读访问器；后续不得以“去掉某个 feature 就只读”为由放宽该断言。
+- 原生隐私镜像必须排在 canonical receipt 之后并留在 UI epoch fence 内；`AppShell.tsx` 中 `setNativePrivacyMode` 的调用顺序由 `scripts/tests/native-shell.test.mjs` 的顺序断言固定，避免镜像先于 canonical 提交造成状态漂移。
 - `dist-inspection/` 与冲突副本脚本属于用户工件，不进入本知识库提交；工作树中的未提交用户工件不被本文件伪装成已发布版本。
 - 原始宽 PRD `docs/PRD/desktop-agent-complete-prd-v1.1.md` 是长期愿景与研究输入；`docs/final/PRD.md` 是当前收敛后的可验证合同。两者冲突时，长期方向保留在 ROADMAP，当前范围以 `final` 六件套和代码/测试为准。
 - `AGENTS.md` 是交接速记，不与 ROADMAP/COMPLETED/REFERENCE 竞争；它只回链本知识库。

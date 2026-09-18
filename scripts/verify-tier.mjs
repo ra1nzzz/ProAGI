@@ -30,6 +30,7 @@ export function runCommand(spec, { terminationGraceMs = DEFAULT_TERMINATION_GRAC
       cwd: repoRoot,
       env: process.env,
       stdio: 'inherit',
+      shell: false,
       detached: process.platform !== 'win32',
     });
     let settled = false;

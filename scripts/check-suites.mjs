@@ -1,25 +1,28 @@
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
 const PR_VITEST_SUITES = Object.freeze(['unit', 'integration', 'fixtures', 'privacy', 'replay', 'worker', 'projection', 'runtime', 'evaluator', 'a11y', 'visual']);
 const CHROMIUM_PROJECTS = Object.freeze(['chromium-desktop', 'chromium-320']);
 const MINUTE_MS = 60_000;
+const NPM_EXECUTABLE = process.platform === 'win32' ? process.execPath : 'npm';
+const npmArgs = (args) => process.platform === 'win32' ? [resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), ...args] : args;
 export const MAX_GITHUB_ARTIFACT_RETENTION_DAYS = 90;
 const command = (executable, args, timeoutMinutes) => Object.freeze({ executable, args: Object.freeze(args), timeoutMs: timeoutMinutes * MINUTE_MS });
+const npmCommand = (args, timeoutMinutes) => command(NPM_EXECUTABLE, npmArgs(args), timeoutMinutes);
 const PR_COMMANDS = Object.freeze([
-  command('npm', ['run', 'check:suites'], 2),
-  command('npm', ['run', 'test:release-gates'], 3),
-  command('npm', ['run', 'typecheck'], 3),
-  command('npm', ['run', 'lint'], 3),
-  command('npm', ['run', 'verify:csp'], 2),
-  command('npm', ['audit', '--audit-level=high'], 3),
-  command('npm', ['run', 'test:report'], 8),
-  command('npm', ['run', 'build'], 5),
-  command('npm', ['run', 'check:production-artifact'], 2),
-  command('npm', ['run', 'test:e2e:report'], 10),
-  command('npm', ['run', 'smoke'], 5),
+  npmCommand(['run', 'check:suites'], 2),
+  npmCommand(['run', 'test:release-gates'], 3),
+  npmCommand(['run', 'typecheck'], 3),
+  npmCommand(['run', 'lint'], 3),
+  npmCommand(['run', 'verify:csp'], 2),
+  npmCommand(['audit', '--audit-level=high'], 3),
+  npmCommand(['run', 'test:report'], 8),
+  npmCommand(['run', 'build'], 5),
+  npmCommand(['run', 'check:production-artifact'], 2),
+  npmCommand(['run', 'test:e2e:report'], 10),
+  npmCommand(['run', 'smoke'], 5),
 ]);
 const NIGHTLY_COMMANDS = Object.freeze([
   ...PR_COMMANDS,

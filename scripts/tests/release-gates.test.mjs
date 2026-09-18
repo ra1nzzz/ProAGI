@@ -30,6 +30,7 @@ test('verification registry provides executable commands and retention policy fo
       assert.ok(command.timeoutMs > 0);
       assert.equal('shell' in command, false);
     });
+    assert.equal(commands[0].executable, process.platform === 'win32' ? process.execPath : 'npm');
   }
   assert.equal(verificationRetentionDaysForTier('release'), MAX_GITHUB_ARTIFACT_RETENTION_DAYS);
   assert.deepEqual(verificationCommandsForTier('nightly').slice(0, verificationCommandsForTier('pr').length), verificationCommandsForTier('pr'));

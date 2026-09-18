@@ -34,10 +34,10 @@
 ## 当前状态
 
 - 已完成 M1 工程闭环、M2 consent-bound 窄只读源工程、M3a typed Runtime/fake/Codex adapter、M3b Markdown projection 工程实现；M1b byte-level Worker 已接入 bundled synthetic，M2 新增用户主动选择且绑定 `ConsentGrant`/`RetentionPolicy` 的严格 `json-import` NDJSON v1 预览，Worker 只做原始 NDJSON 预验证，Application 独立重算并比对候选与 hash，确认后进入 ImportSession 原子发布，Worker 不可用时 fail closed。
-- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 163/163、双视口 E2E 36/36、生产构建与 artifact 检查均通过。真实 Chromium 已覆盖跨标签状态传播、删除/PURGE 协调、consent-bound 用户选择 NDJSON 的 Worker→Application→ImportSession 链路和 TRACE 日志绑定；外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
+- TRACE 诊断、`manual.check` 人工核验记录、脱敏预览与显式导出闭环已完成并提交；M2 只读来源支持 CAS 缩短 retention、旧预览失效和重载 schema 校验。TRACE 单测 8/8、全量 fork 单测 163/163、双视口 E2E 36/36、release gates 19 pass（1 skip by design）、cargo IPC 单测 6/6、生产构建与 artifact 检查均通过。真实 Chromium 已覆盖跨标签状态传播、删除/PURGE 协调、consent-bound 用户选择 NDJSON 的 Worker→Application→ImportSession 链路和 TRACE 日志绑定；外部人工 case 的结果仍按 Gate 队列记录，不伪装成自动化完成。
 - M2 participant pilot 的脱敏 evidence report、统计/置信区间、artifact binding 与运行日志工具已准备并通过 6/6 专门测试；真实参与者数据仍未运行。
 - Gate 1、Gate 2、Gate 3a、Gate 3b 均保持 `CONDITIONAL`；synthetic/自动化结果不得解释为真实用户价值或真实模型质量。
-- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；当前已接入的是必须匹配活动 `ConsentGrant`、来源 key、adapter 版本和保留策略的一次性严格 `json-import` NDJSON v1，不是持续桌面监听、自动采集或任意格式导入；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 尚未开始。
+- M2 participant pilot 与真实 live-model evaluation 仍为 `NOT_RUN`；当前已接入的是必须匹配活动 `ConsentGrant`、来源 key、adapter 版本和保留策略的一次性严格 `json-import` NDJSON v1，不是持续桌面监听、自动采集或任意格式导入；M4 独立动作检查点材料已准备，当前裁决为 `NEED_MORE_EVIDENCE`；M5 Tauri/Windows UIA 工程原型已落地，但 Gate 5 仍为 `NOT_RUN`，详见 [M5-NATIVE-SHELL.md](final/M5-NATIVE-SHELL.md)。
 
 ## 当前/进行中队列（只列未完成）
 
@@ -48,7 +48,7 @@
 | 1 | `Q-M3-LIVE-EVAL` | 真实 provider/live-model evaluation | `NOT_RUN` | M2 pilot 结果、provider approval、出站 consent | 真实任务仅使用最小脱敏输入；记录 protocol/version、request/result hash、timeout/cancel、人工评审和模型价值；provider DTO 不进入 Core。 |
 | 1 | `Q-GATE-3` | Gate 3a/3b 独立裁决 | `CONDITIONAL` | Q-M3-LIVE-EVAL、TRACE 导出可核验 | Runtime 与 Projection 分别提交 contract/fault/live evidence；任一失败只回滚自身，不影响 Core；证据包由 TRACE 与 artifact manifest 互相回链。 |
 | 2 | `Q-M4-DECISION` | 真实动作独立 PRD 检查点 | `PREPARED / NEED_MORE_EVIDENCE / EXTERNAL` | Gate 1–3 证据、真实价值需求 | 见 [M4-ACTION-DECISION.md](final/M4-ACTION-DECISION.md)；只输出 `APPROVE_NEW_PRD | NEED_MORE_EVIDENCE | STOP`。当前 PRD 仍 Shadow-only。 |
-| 3 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `NOT_STARTED` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
+| 3 | `Q-M5-EXE` | Tauri 壳、Windows UIA 窄只读场景与 EXE | `PROTOTYPE / NOT_RUN / INTERNAL` | 前序 Gate、M4 裁决、受支持 Windows 测试机 | 可复现 Tauri build/installer、IPC 身份与审计、一个 allowlisted UIA 场景、安装/卸载/清除/资源/权限撤销证据；不扩展为全桌面或通用 Computer Use。 |
 
 ## 未来队列（按依赖排序）
 
@@ -73,7 +73,7 @@
 | 真实模型任务尚未批准/运行 | Q-M3-LIVE-EVAL、Gate 3a | 通过 provider/出站边界审查并取得可核验的 live evidence。 |
 | Gate 1 的 NVDA、人工视觉、托管 CI 等证据不足 | Gate 1 不能升级为 `PASS` | 每个缺项真实执行并写入 `manual.check`，不能以自动化近似替代。 |
 | M4 尚无可批准的具体动作 PRD 与真实价值证据 | 所有 live action | 先完成 `Q-M2-PILOT`、`Q-M3-LIVE-EVAL` 和 Gate 1–3，再补动作级威胁模型、evaluator 与五轮 review；在此之前保持 Shadow-only。 |
-| M5 尚未建立 Tauri/EXE/UIA 交付链 | 原生常驻、EXE、桌面感知 | 前序 Gate 和 M4 允许后，建立可复现原生构建与窄 UIA 证据。 |
+| M5 Gate 5 证据尚未建立 | 原生常驻、EXE、桌面感知 | 原型已建立 Tauri/EXE/UIA 交付链；仍需前序 Gate、支持矩阵、资源测量和独立人工证据后才能放行。 |
 
 ## 新灵感入队规则
 

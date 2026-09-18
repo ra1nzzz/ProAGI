@@ -17,6 +17,8 @@ import { ORB_STATES, ORB_STATE_LABELS, type ContentMode, type OrbState } from '.
 import { buildInsightPresentation } from './presentation';
 import { Orb, type OrbProfile } from './Orb';
 import { RecoverySurface, type RecoveryKind } from './RecoverySurface';
+import { clearNativeState, setNativePrivacyMode } from '../nativeBridge';
+import { NativeShellControls } from './NativeShellControls';
 
 interface ProagiE2eHarness {
   hit?: (name: 'commit:after-persisted' | 'purge:before-release') => Promise<void>;
@@ -559,12 +561,13 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
       const receipt = nextMode === 'PRIVATE'
         ? await runtimeRef.current!.pausePrivacy()
         : await runtimeRef.current!.resumePrivacy();
+      await setNativePrivacyMode(nextMode);
       if (epoch !== uiEpochRef.current) return;
       if (nextMode === 'PRIVATE') {
         disposeProjection();
       }
       setCanonicalPrivate(nextMode === 'PRIVATE');
-       if (nextMode === 'PRIVATE') {
+      if (nextMode === 'PRIVATE') {
         setPreviewToken(null);
         setPreviousState(orbState === 'PRIVATE' ? 'IDLE' : orbState);
         setOrbState('PRIVATE');
@@ -696,6 +699,7 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
     const epoch = uiEpochRef.current;
     try {
       await runtimeRef.current?.revokeConsent();
+      await clearNativeState();
       if (epoch !== uiEpochRef.current) return;
       disposeProjection();
       setReadonlyConsent(null);
@@ -956,6 +960,8 @@ export function AppShell({ runtimeFactory }: AppShellProps = {}) {
             </> : null}
           </div>
         </section>
+
+      <NativeShellControls />
 
         {readonlyConsent?.grant && !readonlyConsent.revoked ? (
           <details className="consent-details">

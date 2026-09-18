@@ -7,5 +7,7 @@ evidence/
 .tools/
 *.tsbuildinfo
 test-results/
+src-tauri/target/
+src-tauri/gen/
 evidence-logs/
 .DS_Store

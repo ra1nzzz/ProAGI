@@ -45,10 +45,18 @@
     "verify-tier": "node scripts/verify-tier.mjs",
     "verify:pr": "npm run verify-tier -- --tier pr",
     "verify:nightly": "npm run verify-tier -- --tier nightly",
-    "verify:release": "npm run verify-tier -- --tier release"
+    "verify:release": "npm run verify-tier -- --tier release",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test:ipc": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:uia": "cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture",
+    "check:native-artifact": "node scripts/check-native-artifact.mjs",
+    "test:native": "npm run test:ipc && npm run check:native-artifact"
   },
   "dependencies": {
     "@fontsource/inter": "5.2.8",
+    "@tauri-apps/api": "^2.11.1",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "zod": "4.1.5"
@@ -56,6 +64,7 @@
   "devDependencies": {
     "@eslint/js": "9.39.2",
     "@playwright/test": "1.62.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",
     "@types/jest-axe": "3.5.9",
